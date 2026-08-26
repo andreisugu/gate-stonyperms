@@ -1,0 +1,19 @@
+# Binaries
+gate
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+
+# Storage data
+config/stonyperms/
+
+# OS / Editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
