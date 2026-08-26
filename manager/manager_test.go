@@ -83,7 +83,7 @@ func TestManagerGatePermissionFunc(t *testing.T) {
 	u.AddNode(model.NewNode("gate.command.server", true))
 	u.AddNode(model.NewNode("gate.command.send", false))
 
-	permFunc := mgr.GatePermissionFunc(u, nil)
+	permFunc := mgr.GatePermissionFunc(u.UUID, nil)
 
 	if permFunc("gate.command.server") != permission.True {
 		t.Fatalf("expected gate.command.server to be True, got %v", permFunc("gate.command.server"))
