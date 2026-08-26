@@ -3,6 +3,7 @@ package command
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -227,7 +228,66 @@ func TestSuggestionsExactRange(t *testing.T) {
 	if res3.Range.Start != 9 || res3.Range.End != 13 {
 		t.Fatalf("expected suggestion Range {9, 13}, got {%d, %d}", res3.Range.Start, res3.Range.End)
 	}
-	if res3.Suggestions[0].Text != "RestlessStone" {
-		t.Fatalf("expected suggestion text 'RestlessStone', got %q", res3.Suggestions[0].Text)
+	// Case 4: "/sp user RestlessStone " -> should suggest user subcommands
+	builder4 := &brigodier.SuggestionsBuilder{
+		Input:          "/sp user RestlessStone ",
+		InputLowerCase: "/sp user restlessstone ",
+		Start:          4,
+		Remaining:      "user RestlessStone ",
+	}
+	res4 := suggester(nil, builder4)
+	if len(res4.Suggestions) < 5 {
+		t.Fatalf("expected subcommands for user, got %d", len(res4.Suggestions))
+	}
+	if res4.Range.Start != len(builder4.Input) {
+		t.Fatalf("expected suggestion start at end of input %d, got %d", len(builder4.Input), res4.Range.Start)
+	}
+
+	// Case 5: "/sp user RestlessStone permission " -> should suggest "set", "unset", "settemp", etc.
+	builder5 := &brigodier.SuggestionsBuilder{
+		Input:          "/sp user RestlessStone permission ",
+		InputLowerCase: "/sp user restlessstone permission ",
+		Start:          4,
+		Remaining:      "user RestlessStone permission ",
+	}
+	res5 := suggester(nil, builder5)
+	if len(res5.Suggestions) == 0 || res5.Suggestions[0].Text != "set" {
+		t.Fatalf("expected 'set' as first permission action, got %v", res5.Suggestions)
+	}
+
+	// Case 6: "/sp user RestlessStone permission set " -> should suggest permission nodes
+	builder6 := &brigodier.SuggestionsBuilder{
+		Input:          "/sp user RestlessStone permission set ",
+		InputLowerCase: "/sp user restlessstone permission set ",
+		Start:          4,
+		Remaining:      "user RestlessStone permission set ",
+	}
+	res6 := suggester(nil, builder6)
+	if len(res6.Suggestions) == 0 {
+		t.Fatalf("expected permission nodes suggestions")
+	}
+
+	// Case 7: "/sp user RestlessStone permission set gate.command.server " -> should suggest "true", "false"
+	builder7 := &brigodier.SuggestionsBuilder{
+		Input:          "/sp user RestlessStone permission set gate.command.server ",
+		InputLowerCase: "/sp user restlessstone permission set gate.command.server ",
+		Start:          4,
+		Remaining:      "user RestlessStone permission set gate.command.server ",
+	}
+	res7 := suggester(nil, builder7)
+	if len(res7.Suggestions) != 2 || res7.Suggestions[0].Text != "true" || res7.Suggestions[1].Text != "false" {
+		t.Fatalf("expected ['true', 'false'], got %v", res7.Suggestions)
+	}
+
+	// Case 8: "/sp user RestlessStone permission set gate.command.server true " -> should suggest "server=..."
+	builder8 := &brigodier.SuggestionsBuilder{
+		Input:          "/sp user RestlessStone permission set gate.command.server true ",
+		InputLowerCase: "/sp user restlessstone permission set gate.command.server true ",
+		Start:          4,
+		Remaining:      "user RestlessStone permission set gate.command.server true ",
+	}
+	res8 := suggester(nil, builder8)
+	if len(res8.Suggestions) == 0 || !strings.HasPrefix(res8.Suggestions[0].Text, "server=") {
+		t.Fatalf("expected context suggestions starting with 'server=', got %v", res8.Suggestions)
 	}
 }

@@ -13,25 +13,115 @@ import (
 	"github.com/andreisugu/gate-stonyperms/model"
 )
 
-// HandleRoot displays StonyPerms version, stats, and quick-help.
+// HandleRoot displays StonyPerms version, stats, and quick overview or specific help page.
 func HandleRoot(mgr *manager.Manager, src command.Source) error {
+	return HandleHelp(mgr, src, nil)
+}
+
+// HandleHelp displays paginated, comprehensive LuckPerms-style command documentation.
+func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
+	page := 1
+	if len(args) > 0 {
+		if p, err := strconv.Atoi(args[0]); err == nil && p > 0 {
+			page = p
+		}
+	}
+	if page > 4 {
+		page = 4
+	}
+
 	uCount, gCount, tCount, _ := mgr.Stats()
 
-	lines := []string{
-		Header("StonyPerms v1.0.0"),
-		fmt.Sprintf("&7Running on &bGate Proxy&7. High performance LuckPerms-style permissions.&r"),
-		fmt.Sprintf("&7Loaded: &e%d users&7, &e%d groups&7, &e%d tracks&7.&r", uCount, gCount, tCount),
-		Separator(),
-		"&eCommand Overview:&r",
-		"  &b/sp user <user>&7 - Manage user permissions & parents",
-		"  &b/sp group <group>&7 - Manage group permissions & inheritance",
-		"  &b/sp track <track>&7 - Manage promotion tracks",
-		"  &b/sp check <user> <perm>&7 - Evaluate permission with trace",
-		"  &b/sp verbose <on|off>&7 - Toggle live permission logging",
-		"  &b/sp creategroup <group> [weight]&7 - Create a group",
-		"  &b/sp listgroups&7 / &b/sp listtracks&7 - List entities",
-		"  &b/sp sync&7 - Reload data from storage disk",
-		Separator(),
+	var lines []string
+	switch page {
+	case 1:
+		lines = []string{
+			Header("StonyPerms Commands (Page 1/4 - General)"),
+			fmt.Sprintf("&7Proxy:&r &bMinekube Gate&r  &7•&r  &7Loaded:&r &e%d users&7, &e%d groups&7, &e%d tracks&r", uCount, gCount, tCount),
+			Separator(),
+			"  &b/sp info&7 - Display system diagnostic statistics & storage health&r",
+			"  &b/sp sync&7 - Hot-reload all permissions data from disk&r",
+			"  &b/sp check <user> <perm> [context...]&7 - Evaluate permission with trace&r",
+			"  &b/sp verbose <on|off|record> [filter]&7 - Stream live permission checks to chat&r",
+			"  &b/sp creategroup <group> [weight] [displayName]&7 - Create a group&r",
+			"  &b/sp deletegroup <group>&7 - Delete an existing group&r",
+			"  &b/sp listgroups&7 - List all configured groups ordered by weight&r",
+			"  &b/sp createtrack <track>&7 - Create a new promotion track&r",
+			"  &b/sp deletetrack <track>&7 - Delete a promotion track&r",
+			"  &b/sp listtracks&7 - List all configured promotion tracks&r",
+			Separator(),
+			"&7Type &e/sp help 2&7 for User Commands, &e/sp help 3&7 for Groups, &e/sp help 4&7 for Tracks/Logs.&r",
+		}
+
+	case 2:
+		lines = []string{
+			Header("StonyPerms Commands (Page 2/4 - User Management)"),
+			"&eBase Syntax:&r &b/sp user <user> <subcommand>&r",
+			Separator(),
+			"  &b... info&7 - Display user UUID, primary group, parents, and nodes&r",
+			"  &b... permission set <node> [true/false] [context...]&7 - Set permission node&r",
+			"  &b... permission unset <node> [context...]&7 - Remove direct node&r",
+			"  &b... permission settemp <node> <val> <duration> [context...]&7 - Temp perm&r",
+			"  &b... permission unsettemp <node> [context...]&7 - Remove temp perm&r",
+			"  &b... parent add <group> [context...]&7 - Add inherited parent group&r",
+			"  &b... parent set <group> [context...]&7 - Set sole parent & primary group&r",
+			"  &b... parent remove <group> [context...]&7 - Remove inherited parent group&r",
+			"  &b... parent switchprimarygroup <group>&7 - Switch primary group&r",
+			"  &b... parent addtemp <group> <duration> [context...]&7 - Add temp parent&r",
+			"  &b... meta set <key> <value>&7 - Set custom metadata key-value&r",
+			"  &b... meta setprefix [priority] <prefix>&7 - Set player chat/tab prefix&r",
+			"  &b... meta setsuffix [priority] <suffix>&7 - Set player chat/tab suffix&r",
+			"  &b... promote <track>&7 / &b... demote <track>&7 - Progress along track&r",
+			"  &b... showtracks&7 - Show user position in all tracks&r",
+			"  &b... clone <target>&7 - Clone user permissions & parents to another user&r",
+			"  &b... clear&7 - Clear all permissions, parents, and metadata&r",
+			Separator(),
+			"&7Type &e/sp help 3&7 for Group Commands, &e/sp help 4&7 for Tracks/Logs.&r",
+		}
+
+	case 3:
+		lines = []string{
+			Header("StonyPerms Commands (Page 3/4 - Group Management)"),
+			"&eBase Syntax:&r &b/sp group <group> <subcommand>&r",
+			Separator(),
+			"  &b... info&7 - Display group details, display name, weight, and nodes&r",
+			"  &b... setweight <weight>&7 - Set group weight priority&r",
+			"  &b... setdisplayname <name>&7 - Set colored display name&r",
+			"  &b... permission set <node> [true/false] [context...]&7 - Set group perm&r",
+			"  &b... permission unset <node> [context...]&7 - Remove group perm&r",
+			"  &b... permission settemp <node> <val> <duration> [context...]&7 - Temp perm&r",
+			"  &b... parent add <parentGroup> [context...]&7 - Inherit from parent group&r",
+			"  &b... parent remove <parentGroup> [context...]&7 - Remove parent group&r",
+			"  &b... meta setprefix [priority] <prefix>&7 - Set group prefix&r",
+			"  &b... meta setsuffix [priority] <suffix>&7 - Set group suffix&r",
+			"  &b... rename <newName>&7 - Rename group&r",
+			"  &b... clone <newName>&7 - Clone group to a new group&r",
+			"  &b... listmembers&7 - List all users belonging to this group&r",
+			"  &b... showtracks&7 - Show tracks containing this group&r",
+			"  &b... clear&7 - Clear all nodes and parents on this group&r",
+			Separator(),
+			"&7Type &e/sp help 4&7 for Track & Log Commands.&r",
+		}
+
+	case 4:
+		lines = []string{
+			Header("StonyPerms Commands (Page 4/4 - Tracks & Audit Logs)"),
+			"&eTrack Commands:&r &b/sp track <track> <subcommand>&r",
+			"  &b... info&7 - View progression sequence of groups in track&r",
+			"  &b... append <group>&7 - Append a group to the end of the track&r",
+			"  &b... insert <group> <pos>&7 - Insert a group at position (1-based)&r",
+			"  &b... remove <group>&7 - Remove a group from the track&r",
+			"  &b... rename <newName>&7 - Rename the track&r",
+			"  &b... clear&7 - Clear all groups from the track&r",
+			Separator(),
+			"&eAudit Log Commands:&r &b/sp log <subcommand>&r",
+			"  &b/sp log recent [page]&7 - View recent administrative actions&r",
+			"  &b/sp log search <query> [page]&7 - Search audit action logs&r",
+			"  &b/sp log userhistory <user> [page]&7 - View changes for specific user&r",
+			"  &b/sp log grouphistory <group> [page]&7 - View changes for specific group&r",
+			"  &b/sp log trackhistory <track> [page]&7 - View changes for specific track&r",
+			Separator(),
+		}
 	}
 
 	for _, line := range lines {
