@@ -22,11 +22,7 @@ type dummySource struct {
 }
 
 func (d *dummySource) SendMessage(message c.Component, opts ...command.MessageOption) error {
-	if textComp, ok := message.(*c.Text); ok {
-		d.messages = append(d.messages, textComp.Content)
-	} else {
-		d.messages = append(d.messages, fmtComponent(message))
-	}
+	d.messages = append(d.messages, fmtComponent(message))
 	return nil
 }
 
@@ -38,14 +34,40 @@ func (d *dummySource) PermissionValue(perm string) permission.TriState {
 	return permission.True
 }
 
+type limitedSource struct {
+	messages []string
+	perms    map[string]bool
+}
+
+func (l *limitedSource) SendMessage(message c.Component, opts ...command.MessageOption) error {
+	l.messages = append(l.messages, fmtComponent(message))
+	return nil
+}
+
+func (l *limitedSource) HasPermission(perm string) bool {
+	return l.perms[perm]
+}
+
+func (l *limitedSource) PermissionValue(perm string) permission.TriState {
+	if l.perms[perm] {
+		return permission.True
+	}
+	return permission.False
+}
+
 func fmtComponent(comp c.Component) string {
 	if comp == nil {
 		return ""
 	}
 	if t, ok := comp.(*c.Text); ok {
-		return t.Content
+		var b strings.Builder
+		b.WriteString(t.Content)
+		for _, child := range t.Extra {
+			b.WriteString(fmtComponent(child))
+		}
+		return b.String()
 	}
-	return "component"
+	return ""
 }
 
 func setupTestManager(t *testing.T) (*manager.Manager, func()) {
@@ -325,4 +347,37 @@ func TestHelpPagesClickable(t *testing.T) {
 		}
 	}
 }
+
+func TestGranularPermissionEnforcement(t *testing.T) {
+	mgr, cleanup := setupTestManager(t)
+	defer cleanup()
+
+	// 1. User with no permissions is blocked from /sp user
+	userNoPerm := &limitedSource{perms: map[string]bool{}}
+	_ = Dispatch(mgr, userNoPerm, []string{"user", "Steve", "info"})
+	if len(userNoPerm.messages) == 0 || !strings.Contains(userNoPerm.messages[0], "do not have permission") {
+		t.Fatalf("expected permission denial message, got: %v", userNoPerm.messages)
+	}
+
+	// 2. User with stonyperms.info can run /sp info but not /sp user
+	userInfoOnly := &limitedSource{perms: map[string]bool{"stonyperms.info": true}}
+	_ = Dispatch(mgr, userInfoOnly, []string{"info"})
+	if len(userInfoOnly.messages) == 0 || strings.Contains(userInfoOnly.messages[0], "do not have permission") {
+		t.Fatalf("expected /sp info to succeed, got: %v", userInfoOnly.messages)
+	}
+
+	userInfoOnly.messages = nil
+	_ = Dispatch(mgr, userInfoOnly, []string{"user", "Steve", "info"})
+	if len(userInfoOnly.messages) == 0 || !strings.Contains(userInfoOnly.messages[0], "do not have permission") {
+		t.Fatalf("expected /sp user to be denied for info-only user")
+	}
+
+	// 3. User with stonyperms.admin can run everything
+	userAdmin := &limitedSource{perms: map[string]bool{"stonyperms.admin": true}}
+	_ = Dispatch(mgr, userAdmin, []string{"user", "Steve", "info"})
+	if len(userAdmin.messages) > 0 && strings.Contains(userAdmin.messages[0], "do not have permission") {
+		t.Fatalf("admin user should not be denied")
+	}
+}
+
 

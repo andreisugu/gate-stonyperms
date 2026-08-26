@@ -28,10 +28,37 @@ func RegisterCommands(p *proxy.Proxy, mgr *manager.Manager) {
 	}
 }
 
+func hasPerm(src command.Source, required ...string) bool {
+	if src.HasPermission("stonyperms.admin") || src.HasPermission("stonyperms.*") || src.HasPermission("*") {
+		return true
+	}
+	for _, req := range required {
+		if src.HasPermission(req) {
+			return true
+		}
+	}
+	return false
+}
+
+func checkPerm(src command.Source, required ...string) bool {
+	if hasPerm(src, required...) {
+		return true
+	}
+	permName := "stonyperms.admin"
+	if len(required) > 0 {
+		permName = required[0]
+	}
+	_ = src.SendMessage(Msg(Prefix + "&cYou do not have permission to execute this command (&e%s&c).", permName))
+	return false
+}
+
 func buildCommandTree(alias string, p *proxy.Proxy, mgr *manager.Manager) brigodier.LiteralNodeBuilder {
 	return brigodier.Literal(alias).
 		Requires(command.Requires(func(ctx *command.RequiresContext) bool {
-			return true // Handled dynamically in Dispatch
+			return hasPerm(ctx.Source, "stonyperms.use", "stonyperms.info", "stonyperms.sync", "stonyperms.check",
+				"stonyperms.verbose", "stonyperms.user", "stonyperms.group", "stonyperms.track", "stonyperms.log",
+				"stonyperms.listgroups", "stonyperms.creategroup", "stonyperms.deletegroup",
+				"stonyperms.listtracks", "stonyperms.createtrack", "stonyperms.deletetrack")
 		})).
 		Executes(command.Command(func(cmdCtx *command.Context) error {
 			return HandleRoot(mgr, cmdCtx.Source)
@@ -58,34 +85,79 @@ func Dispatch(mgr *manager.Manager, src command.Source, args []string) error {
 
 	switch root {
 	case "help", "?":
+		if !checkPerm(src, "stonyperms.use") {
+			return nil
+		}
 		return HandleHelp(mgr, src, rest)
 	case "info":
+		if !checkPerm(src, "stonyperms.info") {
+			return nil
+		}
 		return HandleInfo(mgr, src)
 	case "sync", "reload", "reloadconfig":
+		if !checkPerm(src, "stonyperms.sync") {
+			return nil
+		}
 		return HandleSync(mgr, src)
 	case "check":
+		if !checkPerm(src, "stonyperms.check") {
+			return nil
+		}
 		return HandleCheck(mgr, src, rest)
 	case "verbose", "v":
+		if !checkPerm(src, "stonyperms.verbose") {
+			return nil
+		}
 		return HandleVerbose(mgr, src, rest)
 	case "creategroup":
+		if !checkPerm(src, "stonyperms.creategroup", "stonyperms.group") {
+			return nil
+		}
 		return HandleCreateGroup(mgr, src, rest)
 	case "deletegroup":
+		if !checkPerm(src, "stonyperms.deletegroup", "stonyperms.group") {
+			return nil
+		}
 		return HandleDeleteGroup(mgr, src, rest)
 	case "listgroups", "groups":
+		if !checkPerm(src, "stonyperms.listgroups", "stonyperms.group") {
+			return nil
+		}
 		return HandleListGroups(mgr, src)
 	case "createtrack":
+		if !checkPerm(src, "stonyperms.createtrack", "stonyperms.track") {
+			return nil
+		}
 		return HandleCreateTrack(mgr, src, rest)
 	case "deletetrack":
+		if !checkPerm(src, "stonyperms.deletetrack", "stonyperms.track") {
+			return nil
+		}
 		return HandleDeleteTrack(mgr, src, rest)
 	case "listtracks", "tracks":
+		if !checkPerm(src, "stonyperms.listtracks", "stonyperms.track") {
+			return nil
+		}
 		return HandleListTracks(mgr, src)
 	case "user", "u":
+		if !checkPerm(src, "stonyperms.user") {
+			return nil
+		}
 		return HandleUserDispatch(mgr, src, rest)
 	case "group", "g":
+		if !checkPerm(src, "stonyperms.group") {
+			return nil
+		}
 		return HandleGroupDispatch(mgr, src, rest)
 	case "track", "t":
+		if !checkPerm(src, "stonyperms.track") {
+			return nil
+		}
 		return HandleTrackDispatch(mgr, src, rest)
 	case "log", "logs", "history":
+		if !checkPerm(src, "stonyperms.log") {
+			return nil
+		}
 		return HandleLogDispatch(mgr, src, rest)
 	default:
 		return src.SendMessage(Msg(Prefix+"&cUnknown subcommand '&e%s&c'. Type &b/sp&c for help.&r", root))
@@ -188,18 +260,50 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			"gate.command.find",
 			"gate.*",
 			"stonyperms.admin",
+			"stonyperms.use",
+			"stonyperms.info",
+			"stonyperms.sync",
+			"stonyperms.check",
+			"stonyperms.verbose",
 			"stonyperms.user",
 			"stonyperms.group",
 			"stonyperms.track",
+			"stonyperms.log",
+			"stonyperms.creategroup",
+			"stonyperms.deletegroup",
+			"stonyperms.listgroups",
+			"stonyperms.createtrack",
+			"stonyperms.deletetrack",
+			"stonyperms.listtracks",
 			"stonyperms.*",
 			"simplewhitelist.admin",
+			"simplewhitelist.use",
+			"simplewhitelist.add",
+			"simplewhitelist.remove",
+			"simplewhitelist.list",
+			"simplewhitelist.toggle",
+			"simplewhitelist.reload",
 			"simplewhitelist.bypass",
 			"bettertab.admin",
+			"bettertab.reload",
 			"bettertab.name",
 			"bettertab.name.color",
+			"bettertab.toggle",
+			"bettertab.info",
+			"bettertab.reset",
 			"smartlimbo.admin",
+			"smartlimbo.reload",
+			"smartlimbo.status",
+			"smartlimbo.reconnect",
+			"smartlimbo.queue",
+			"smartlimbo.priority",
+			"smartlimbo.bypass",
 			"discord4gate.admin",
+			"discord4gate.reload",
+			"discord4gate.status",
+			"discord4gate.discord",
 			"hybridforwarding.admin",
+			"hybridforwarding.reload",
 			"minecraft.command.teleport",
 			"minecraft.command.gamemode",
 			"*",
