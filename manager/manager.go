@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,15 +17,33 @@ import (
 
 // Manager coordinates in-memory data, persistence, permission evaluation, and promotion tracks.
 type Manager struct {
-	mu         sync.RWMutex
-	storage    storage.StorageProvider
-	engine     *engine.Engine
-	users      map[uuid.UUID]*model.User
-	nameToUUID map[string]uuid.UUID
-	groups     map[string]*model.Group
-	tracks     map[string]*model.Track
-	logs       []model.LogEntry
-	stopChan   chan struct{}
+	mu             sync.RWMutex
+	storage        storage.StorageProvider
+	engine         *engine.Engine
+	users          map[uuid.UUID]*model.User
+	nameToUUID     map[string]uuid.UUID
+	groups         map[string]*model.Group
+	tracks         map[string]*model.Track
+	logs           []model.LogEntry
+	updateListener atomic.Pointer[func()]
+	stopChan       chan struct{}
+}
+
+// SetUpdateListener registers a callback triggered whenever permissions, groups, or users are modified.
+func (m *Manager) SetUpdateListener(listener func()) {
+	if listener == nil {
+		m.updateListener.Store(nil)
+	} else {
+		m.updateListener.Store(&listener)
+	}
+}
+
+func (m *Manager) notifyUpdate() {
+	ptr := m.updateListener.Load()
+	if ptr != nil && *ptr != nil {
+		fn := *ptr
+		go fn()
+	}
 }
 
 // New creates and loads a new StonyPerms Manager.
@@ -72,8 +91,6 @@ func (m *Manager) Reload() error {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	m.users = bundle.Users
 	m.groups = bundle.Groups
 	m.tracks = bundle.Tracks
@@ -85,6 +102,8 @@ func (m *Manager) Reload() error {
 			m.nameToUUID[strings.ToLower(u.Username)] = id
 		}
 	}
+	m.mu.Unlock()
+	m.notifyUpdate()
 
 	return nil
 }
@@ -119,14 +138,16 @@ func (m *Manager) GetUserByName(query string) *model.User {
 // GetOrCreateUser retrieves an existing user or creates a new one with the given UUID and name.
 func (m *Manager) GetOrCreateUser(id uuid.UUID, username string) *model.User {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if u, ok := m.users[id]; ok {
 		if username != "" && u.Username != username {
 			u.Username = username
 			m.nameToUUID[strings.ToLower(username)] = id
+			m.mu.Unlock()
 			_ = m.storage.SaveUser(u)
+			m.notifyUpdate()
+			return u
 		}
+		m.mu.Unlock()
 		return u
 	}
 
@@ -135,7 +156,10 @@ func (m *Manager) GetOrCreateUser(id uuid.UUID, username string) *model.User {
 	if username != "" {
 		m.nameToUUID[strings.ToLower(username)] = id
 	}
+	m.mu.Unlock()
+
 	_ = m.storage.SaveUser(u)
+	m.notifyUpdate()
 	return u
 }
 
@@ -148,7 +172,9 @@ func (m *Manager) SaveUser(user *model.User) error {
 	}
 	m.mu.Unlock()
 
-	return m.storage.SaveUser(user)
+	err := m.storage.SaveUser(user)
+	m.notifyUpdate()
+	return err
 }
 
 // DeleteUser deletes a user from memory and storage.
@@ -160,7 +186,9 @@ func (m *Manager) DeleteUser(id uuid.UUID) error {
 	}
 	m.mu.Unlock()
 
-	return m.storage.DeleteUser(id)
+	err := m.storage.DeleteUser(id)
+	m.notifyUpdate()
+	return err
 }
 
 // -----------------------------------------------------------------------------
@@ -194,19 +222,20 @@ func (m *Manager) CreateGroup(name string, weight int, displayName string) (*mod
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if _, exists := m.groups[name]; exists {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("group '%s' already exists", name)
 	}
 
 	g := model.NewGroup(name, weight)
 	g.DisplayName = displayName
 	m.groups[name] = g
+	m.mu.Unlock()
 
 	if err := m.storage.SaveGroup(g); err != nil {
 		return nil, err
 	}
+	m.notifyUpdate()
 	return g, nil
 }
 
@@ -216,7 +245,9 @@ func (m *Manager) SaveGroup(group *model.Group) error {
 	m.groups[strings.ToLower(group.Name)] = group
 	m.mu.Unlock()
 
-	return m.storage.SaveGroup(group)
+	err := m.storage.SaveGroup(group)
+	m.notifyUpdate()
+	return err
 }
 
 // DeleteGroup removes a group from cache and storage.
@@ -230,7 +261,9 @@ func (m *Manager) DeleteGroup(name string) error {
 	delete(m.groups, name)
 	m.mu.Unlock()
 
-	return m.storage.DeleteGroup(name)
+	err := m.storage.DeleteGroup(name)
+	m.notifyUpdate()
+	return err
 }
 
 // GetGroupMembers returns all users that have this group as primary group or direct parent.
