@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	c "go.minekube.com/common/minecraft/component"
 	"go.minekube.com/gate/pkg/command"
 
 	"github.com/andreisugu/gate-stonyperms/engine"
@@ -18,7 +19,7 @@ func HandleRoot(mgr *manager.Manager, src command.Source) error {
 	return HandleHelp(mgr, src, nil)
 }
 
-// HandleHelp displays paginated, comprehensive LuckPerms-style command documentation.
+// HandleHelp displays paginated, comprehensive LuckPerms-style command documentation with clickable commands.
 func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
 	page := 1
 	if len(args) > 0 {
@@ -32,102 +33,140 @@ func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
 
 	uCount, gCount, tCount, _ := mgr.Stats()
 
-	var lines []string
+	var components []c.Component
+
 	switch page {
 	case 1:
-		lines = []string{
-			Header("StonyPerms Commands (Page 1/4 - General)"),
-			fmt.Sprintf("&7Proxy:&r &bMinekube Gate&r  &7•&r  &7Loaded:&r &e%d users&7, &e%d groups&7, &e%d tracks&r", uCount, gCount, tCount),
-			Separator(),
-			"  &b/sp info&7 - Display system diagnostic statistics & storage health&r",
-			"  &b/sp sync&7 - Hot-reload all permissions data from disk&r",
-			"  &b/sp check <user> <perm> [context...]&7 - Evaluate permission with trace&r",
-			"  &b/sp verbose <on|off|record> [filter]&7 - Stream live permission checks to chat&r",
-			"  &b/sp creategroup <group> [weight] [displayName]&7 - Create a group&r",
-			"  &b/sp deletegroup <group>&7 - Delete an existing group&r",
-			"  &b/sp listgroups&7 - List all configured groups ordered by weight&r",
-			"  &b/sp createtrack <track>&7 - Create a new promotion track&r",
-			"  &b/sp deletetrack <track>&7 - Delete a promotion track&r",
-			"  &b/sp listtracks&7 - List all configured promotion tracks&r",
-			Separator(),
-			"&7Type &e/sp help 2&7 for User Commands, &e/sp help 3&7 for Groups, &e/sp help 4&7 for Tracks/Logs.&r",
-		}
+		components = append(components,
+			MsgPlain(Header("StonyPerms Commands (Page 1/4 - General)")),
+			MsgPlain(fmt.Sprintf("&7Proxy:&r &bMinekube Gate&r  &7•&r  &7Loaded:&r &e%d users&7, &e%d groups&7, &e%d tracks&r", uCount, gCount, tCount)),
+			MsgPlain(Separator()),
+			ClickableRunCmd("&b/sp info&r", "/sp info", "Display system diagnostic statistics & storage health"),
+			ClickableRunCmd("&b/sp sync&r", "/sp sync", "Hot-reload all permissions data from disk"),
+			ClickableCmd("&b/sp check <user> <perm> [context...]&r", "/sp check ", "Evaluate permission with trace"),
+			ClickableCmd("&b/sp verbose <on|off|record> [filter]&r", "/sp verbose ", "Stream live permission checks to chat"),
+			ClickableCmd("&b/sp creategroup <group> [weight] [displayName]&r", "/sp creategroup ", "Create a new permission group"),
+			ClickableCmd("&b/sp deletegroup <group>&r", "/sp deletegroup ", "Delete an existing group"),
+			ClickableRunCmd("&b/sp listgroups&r", "/sp listgroups", "List all configured groups ordered by weight"),
+			ClickableCmd("&b/sp createtrack <track>&r", "/sp createtrack ", "Create a new promotion track"),
+			ClickableCmd("&b/sp deletetrack <track>&r", "/sp deletetrack ", "Delete a promotion track"),
+			ClickableRunCmd("&b/sp listtracks&r", "/sp listtracks", "List all configured promotion tracks"),
+			MsgPlain(Separator()),
+			makeHelpNavFooter(1, 4),
+		)
 
 	case 2:
-		lines = []string{
-			Header("StonyPerms Commands (Page 2/4 - User Management)"),
-			"&eBase Syntax:&r &b/sp user <user> <subcommand>&r",
-			Separator(),
-			"  &b... info&7 - Display user UUID, primary group, parents, and nodes&r",
-			"  &b... permission set <node> [true/false] [context...]&7 - Set permission node&r",
-			"  &b... permission unset <node> [context...]&7 - Remove direct node&r",
-			"  &b... permission settemp <node> <val> <duration> [context...]&7 - Temp perm&r",
-			"  &b... permission unsettemp <node> [context...]&7 - Remove temp perm&r",
-			"  &b... parent add <group> [context...]&7 - Add inherited parent group&r",
-			"  &b... parent set <group> [context...]&7 - Set sole parent & primary group&r",
-			"  &b... parent remove <group> [context...]&7 - Remove inherited parent group&r",
-			"  &b... parent switchprimarygroup <group>&7 - Switch primary group&r",
-			"  &b... parent addtemp <group> <duration> [context...]&7 - Add temp parent&r",
-			"  &b... meta set <key> <value>&7 - Set custom metadata key-value&r",
-			"  &b... meta setprefix [priority] <prefix>&7 - Set player chat/tab prefix&r",
-			"  &b... meta setsuffix [priority] <suffix>&7 - Set player chat/tab suffix&r",
-			"  &b... promote <track>&7 / &b... demote <track>&7 - Progress along track&r",
-			"  &b... showtracks&7 - Show user position in all tracks&r",
-			"  &b... clone <target>&7 - Clone user permissions & parents to another user&r",
-			"  &b... clear&7 - Clear all permissions, parents, and metadata&r",
-			Separator(),
-			"&7Type &e/sp help 3&7 for Group Commands, &e/sp help 4&7 for Tracks/Logs.&r",
-		}
+		components = append(components,
+			MsgPlain(Header("StonyPerms Commands (Page 2/4 - User Management)")),
+			MsgPlain("&eBase Syntax:&r &b/sp user <user> <subcommand>&r  &7(Click command to insert into chat)&r"),
+			MsgPlain(Separator()),
+			ClickableCmd("&b/sp user <user> info&r", "/sp user ", "Display user UUID, primary group, parents, and nodes"),
+			ClickableCmd("&b/sp user <user> permission set <node> [true/false] [context...]&r", "/sp user ", "Set permission node"),
+			ClickableCmd("&b/sp user <user> permission unset <node> [context...]&r", "/sp user ", "Remove direct node"),
+			ClickableCmd("&b/sp user <user> permission settemp <node> <val> <duration> [context...]&r", "/sp user ", "Set temporary permission"),
+			ClickableCmd("&b/sp user <user> permission unsettemp <node> [context...]&r", "/sp user ", "Remove temporary permission"),
+			ClickableCmd("&b/sp user <user> parent add <group> [context...]&r", "/sp user ", "Add inherited parent group"),
+			ClickableCmd("&b/sp user <user> parent set <group> [context...]&r", "/sp user ", "Set sole parent & primary group"),
+			ClickableCmd("&b/sp user <user> parent remove <group> [context...]&r", "/sp user ", "Remove inherited parent group"),
+			ClickableCmd("&b/sp user <user> parent switchprimarygroup <group>&r", "/sp user ", "Switch primary group"),
+			ClickableCmd("&b/sp user <user> parent addtemp <group> <duration> [context...]&r", "/sp user ", "Add temporary parent"),
+			ClickableCmd("&b/sp user <user> meta set <key> <value>&r", "/sp user ", "Set custom metadata key-value"),
+			ClickableCmd("&b/sp user <user> meta setprefix [priority] <prefix>&r", "/sp user ", "Set player chat/tab prefix"),
+			ClickableCmd("&b/sp user <user> meta setsuffix [priority] <suffix>&r", "/sp user ", "Set player chat/tab suffix"),
+			ClickableCmd("&b/sp user <user> promote <track>&r", "/sp user ", "Progress player up a track"),
+			ClickableCmd("&b/sp user <user> demote <track>&r", "/sp user ", "Demote player down a track"),
+			ClickableCmd("&b/sp user <user> showtracks&r", "/sp user ", "Show user position in all tracks"),
+			ClickableCmd("&b/sp user <user> clone <target>&r", "/sp user ", "Clone user data to another user"),
+			ClickableCmd("&b/sp user <user> clear&r", "/sp user ", "Clear all permissions, parents, and metadata"),
+			MsgPlain(Separator()),
+			makeHelpNavFooter(2, 4),
+		)
 
 	case 3:
-		lines = []string{
-			Header("StonyPerms Commands (Page 3/4 - Group Management)"),
-			"&eBase Syntax:&r &b/sp group <group> <subcommand>&r",
-			Separator(),
-			"  &b... info&7 - Display group details, display name, weight, and nodes&r",
-			"  &b... setweight <weight>&7 - Set group weight priority&r",
-			"  &b... setdisplayname <name>&7 - Set colored display name&r",
-			"  &b... permission set <node> [true/false] [context...]&7 - Set group perm&r",
-			"  &b... permission unset <node> [context...]&7 - Remove group perm&r",
-			"  &b... permission settemp <node> <val> <duration> [context...]&7 - Temp perm&r",
-			"  &b... parent add <parentGroup> [context...]&7 - Inherit from parent group&r",
-			"  &b... parent remove <parentGroup> [context...]&7 - Remove parent group&r",
-			"  &b... meta setprefix [priority] <prefix>&7 - Set group prefix&r",
-			"  &b... meta setsuffix [priority] <suffix>&7 - Set group suffix&r",
-			"  &b... rename <newName>&7 - Rename group&r",
-			"  &b... clone <newName>&7 - Clone group to a new group&r",
-			"  &b... listmembers&7 - List all users belonging to this group&r",
-			"  &b... showtracks&7 - Show tracks containing this group&r",
-			"  &b... clear&7 - Clear all nodes and parents on this group&r",
-			Separator(),
-			"&7Type &e/sp help 4&7 for Track & Log Commands.&r",
-		}
+		components = append(components,
+			MsgPlain(Header("StonyPerms Commands (Page 3/4 - Group Management)")),
+			MsgPlain("&eBase Syntax:&r &b/sp group <group> <subcommand>&r  &7(Click command to insert into chat)&r"),
+			MsgPlain(Separator()),
+			ClickableCmd("&b/sp group <group> info&r", "/sp group ", "Display group details, display name, weight, and nodes"),
+			ClickableCmd("&b/sp group <group> setweight <weight>&r", "/sp group ", "Set group weight priority"),
+			ClickableCmd("&b/sp group <group> setdisplayname <name>&r", "/sp group ", "Set colored display name"),
+			ClickableCmd("&b/sp group <group> permission set <node> [true/false] [context...]&r", "/sp group ", "Set group permission"),
+			ClickableCmd("&b/sp group <group> permission unset <node> [context...]&r", "/sp group ", "Remove group permission"),
+			ClickableCmd("&b/sp group <group> permission settemp <node> <val> <duration> [context...]&r", "/sp group ", "Set temporary group permission"),
+			ClickableCmd("&b/sp group <group> parent add <parentGroup> [context...]&r", "/sp group ", "Inherit from parent group"),
+			ClickableCmd("&b/sp group <group> parent remove <parentGroup> [context...]&r", "/sp group ", "Remove parent group"),
+			ClickableCmd("&b/sp group <group> meta setprefix [priority] <prefix>&r", "/sp group ", "Set group prefix"),
+			ClickableCmd("&b/sp group <group> meta setsuffix [priority] <suffix>&r", "/sp group ", "Set group suffix"),
+			ClickableCmd("&b/sp group <group> rename <newName>&r", "/sp group ", "Rename group"),
+			ClickableCmd("&b/sp group <group> clone <newName>&r", "/sp group ", "Clone group to a new group"),
+			ClickableCmd("&b/sp group <group> listmembers&r", "/sp group ", "List all users in this group"),
+			ClickableCmd("&b/sp group <group> showtracks&r", "/sp group ", "Show tracks containing this group"),
+			ClickableCmd("&b/sp group <group> clear&r", "/sp group ", "Clear all nodes and parents on this group"),
+			MsgPlain(Separator()),
+			makeHelpNavFooter(3, 4),
+		)
 
 	case 4:
-		lines = []string{
-			Header("StonyPerms Commands (Page 4/4 - Tracks & Audit Logs)"),
-			"&eTrack Commands:&r &b/sp track <track> <subcommand>&r",
-			"  &b... info&7 - View progression sequence of groups in track&r",
-			"  &b... append <group>&7 - Append a group to the end of the track&r",
-			"  &b... insert <group> <pos>&7 - Insert a group at position (1-based)&r",
-			"  &b... remove <group>&7 - Remove a group from the track&r",
-			"  &b... rename <newName>&7 - Rename the track&r",
-			"  &b... clear&7 - Clear all groups from the track&r",
-			Separator(),
-			"&eAudit Log Commands:&r &b/sp log <subcommand>&r",
-			"  &b/sp log recent [page]&7 - View recent administrative actions&r",
-			"  &b/sp log search <query> [page]&7 - Search audit action logs&r",
-			"  &b/sp log userhistory <user> [page]&7 - View changes for specific user&r",
-			"  &b/sp log grouphistory <group> [page]&7 - View changes for specific group&r",
-			"  &b/sp log trackhistory <track> [page]&7 - View changes for specific track&r",
-			Separator(),
+		components = append(components,
+			MsgPlain(Header("StonyPerms Commands (Page 4/4 - Tracks & Audit Logs)")),
+			MsgPlain("&eTrack Commands:&r &b/sp track <track> <subcommand>&r"),
+			ClickableCmd("&b/sp track <track> info&r", "/sp track ", "View progression sequence of groups in track"),
+			ClickableCmd("&b/sp track <track> append <group>&r", "/sp track ", "Append a group to end of track"),
+			ClickableCmd("&b/sp track <track> insert <group> <pos>&r", "/sp track ", "Insert a group at position (1-based)"),
+			ClickableCmd("&b/sp track <track> remove <group>&r", "/sp track ", "Remove a group from track"),
+			ClickableCmd("&b/sp track <track> rename <newName>&r", "/sp track ", "Rename the track"),
+			ClickableCmd("&b/sp track <track> clear&r", "/sp track ", "Clear all groups from track"),
+			MsgPlain(Separator()),
+			MsgPlain("&eAudit Log Commands:&r &b/sp log <subcommand>&r"),
+			ClickableRunCmd("&b/sp log recent [page]&r", "/sp log recent", "View recent administrative actions"),
+			ClickableCmd("&b/sp log search <query> [page]&r", "/sp log search ", "Search audit action logs"),
+			ClickableCmd("&b/sp log userhistory <user> [page]&r", "/sp log userhistory ", "View changes for specific user"),
+			ClickableCmd("&b/sp log grouphistory <group> [page]&r", "/sp log grouphistory ", "View changes for specific group"),
+			ClickableCmd("&b/sp log trackhistory <track> [page]&r", "/sp log trackhistory ", "View changes for specific track"),
+			MsgPlain(Separator()),
+			makeHelpNavFooter(4, 4),
+		)
+	}
+
+	for _, comp := range components {
+		_ = src.SendMessage(comp)
+	}
+	return nil
+}
+
+func makeHelpNavFooter(currentPage, totalPages int) c.Component {
+	var extra []c.Component
+
+	// Prev button
+	if currentPage > 1 {
+		prevBtn := PageButton("&8[&b◀ Prev&8]&r", fmt.Sprintf("/sp help %d", currentPage-1), fmt.Sprintf("&eClick to go to Page %d", currentPage-1))
+		extra = append(extra, prevBtn, Msg("  "))
+	} else {
+		extra = append(extra, Msg("&8[◀ Prev]&r  "))
+	}
+
+	// Direct Page numbers: [1] [2] [3] [4]
+	for p := 1; p <= totalPages; p++ {
+		if p == currentPage {
+			extra = append(extra, Msg(fmt.Sprintf("&e&l[%d]&r ", p)))
+		} else {
+			btn := PageButton(fmt.Sprintf("&b[%d]&r ", p), fmt.Sprintf("/sp help %d", p), fmt.Sprintf("&eClick to open Page %d", p))
+			extra = append(extra, btn)
 		}
 	}
 
-	for _, line := range lines {
-		_ = src.SendMessage(MsgPlain(line))
+	// Next button
+	if currentPage < totalPages {
+		nextBtn := PageButton("&8[&bNext ▶&8]&r", fmt.Sprintf("/sp help %d", currentPage+1), fmt.Sprintf("&eClick to go to Page %d", currentPage+1))
+		extra = append(extra, Msg(" "), nextBtn)
+	} else {
+		extra = append(extra, Msg(" &8[Next ▶]&r"))
 	}
-	return nil
+
+	return &c.Text{
+		Content: "",
+		Extra:   extra,
+	}
 }
 
 // HandleInfo displays detailed system diagnostic information.

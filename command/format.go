@@ -12,26 +12,98 @@ import (
 
 var legacyCodec = &legacy.Legacy{Char: legacy.AmpersandChar}
 
-// Msg formats a legacy ampersand-colored string with optional format arguments.
-func Msg(format string, a ...interface{}) c.Component {
-	text := format
+// Msg converts a legacy ampersand-colored string to a Component, with optional sprintf formatting.
+func Msg(msg string, a ...any) c.Component {
 	if len(a) > 0 {
-		text = fmt.Sprintf(format, a...)
+		msg = fmt.Sprintf(msg, a...)
 	}
-	comp, err := legacyCodec.Unmarshal([]byte(text))
+	comp, err := legacyCodec.Unmarshal([]byte(msg))
 	if err != nil {
-		return &c.Text{Content: text}
+		return &c.Text{Content: msg}
 	}
 	return comp
 }
 
-// MsgPlain converts a pre-formatted string directly to a Component without sprintf processing.
-func MsgPlain(text string) c.Component {
-	comp, err := legacyCodec.Unmarshal([]byte(text))
+// MsgPlain converts a pre-formatted string directly to a Component.
+func MsgPlain(msg string) c.Component {
+	comp, err := legacyCodec.Unmarshal([]byte(msg))
 	if err != nil {
-		return &c.Text{Content: text}
+		return &c.Text{Content: msg}
 	}
 	return comp
+}
+
+// Msgf formats a legacy ampersand-colored string using fmt.Sprintf and converts it to a Component.
+func Msgf(msg string, a ...any) c.Component {
+	return Msg(msg, a...)
+}
+
+// ClickableCmd creates a text component with a hover tooltip and click event to insert the command into chat.
+func ClickableCmd(displayCmd, insertCmd, description string) c.Component {
+	cmdComp := MsgPlain(displayCmd)
+	hoverText := MsgPlain(fmt.Sprintf("&eClick to insert into chat:\n&b%s\n&7%s", insertCmd, description))
+
+	applyStyle := func(target c.Component) {
+		if st := target.Style(); st != nil {
+			st.ClickEvent = c.SuggestCommand(insertCmd)
+			st.HoverEvent = c.ShowText(hoverText)
+		}
+	}
+
+	applyStyle(cmdComp)
+	for _, child := range cmdComp.Children() {
+		applyStyle(child)
+	}
+
+	return &c.Text{
+		Extra: []c.Component{
+			MsgPlain("  "),
+			cmdComp,
+			MsgPlain("&7 - " + description + "&r"),
+		},
+	}
+}
+
+// ClickableRunCmd creates a text component with a hover tooltip and click event to directly execute the command on click.
+func ClickableRunCmd(displayCmd, runCmd, description string) c.Component {
+	cmdComp := MsgPlain(displayCmd)
+	hoverText := MsgPlain(fmt.Sprintf("&aClick to execute:\n&b%s\n&7%s", runCmd, description))
+
+	applyStyle := func(target c.Component) {
+		if st := target.Style(); st != nil {
+			st.ClickEvent = c.RunCommand(runCmd)
+			st.HoverEvent = c.ShowText(hoverText)
+		}
+	}
+
+	applyStyle(cmdComp)
+	for _, child := range cmdComp.Children() {
+		applyStyle(child)
+	}
+
+	return &c.Text{
+		Extra: []c.Component{
+			MsgPlain("  "),
+			cmdComp,
+			MsgPlain("&7 - " + description + "&r"),
+		},
+	}
+}
+
+// PageButton creates a styled clickable button to jump between help pages.
+func PageButton(label, command, hoverText string) c.Component {
+	btn := MsgPlain(label)
+	applyStyle := func(target c.Component) {
+		if st := target.Style(); st != nil {
+			st.ClickEvent = c.RunCommand(command)
+			st.HoverEvent = c.ShowText(MsgPlain(hoverText))
+		}
+	}
+	applyStyle(btn)
+	for _, child := range btn.Children() {
+		applyStyle(child)
+	}
+	return btn
 }
 
 // Prefix returns the standard StonyPerms [SP] message prefix.

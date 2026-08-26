@@ -127,18 +127,26 @@ func ParseCommandLine(line string) []string {
 
 func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 	return func(ctx *brigodier.CommandContext, builder *brigodier.SuggestionsBuilder) *brigodier.Suggestions {
+		input := builder.Input
 		remaining := builder.Remaining
 		args := strings.Fields(remaining)
-		trailingSpace := strings.HasSuffix(remaining, " ")
 
-		// Calculate exact replacement range for the current word being typed/completed
+		// Check if input ends with a space (meaning user finished a token and wants suggestions for next token)
+		trailingSpace := strings.HasSuffix(input, " ") || strings.HasSuffix(remaining, " ")
+
 		var wordStart int
 		var currentWordPrefix string
 
-		if trailingSpace {
-			wordStart = len(builder.Input)
+		if len(args) == 0 {
+			// User typed "/sp " -> ready for root subcommand at the cursor
+			wordStart = len(input)
+			currentWordPrefix = ""
+		} else if trailingSpace {
+			// User finished previous word and is starting the next word
+			wordStart = len(input)
 			currentWordPrefix = ""
 		} else {
+			// User is typing/completing current word
 			lastSpace := strings.LastIndex(remaining, " ")
 			if lastSpace >= 0 {
 				wordStart = builder.Start + lastSpace + 1
