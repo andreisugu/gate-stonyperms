@@ -446,12 +446,17 @@ func (m *Manager) PermissionValue(user *model.User, perm string, contexts map[st
 	return m.engine.PermissionValue(user, groupsCopy, perm, contexts)
 }
 
-// GatePermissionFunc creates a Gate permission.Func for a user.
-func (m *Manager) GatePermissionFunc(user *model.User, contextProvider func() map[string]string) permission.Func {
+// GatePermissionFunc creates a Gate permission.Func for a user by UUID.
+func (m *Manager) GatePermissionFunc(userID uuid.UUID, contextProvider func() map[string]string) permission.Func {
 	return func(perm string) permission.TriState {
 		var ctxs map[string]string
 		if contextProvider != nil {
 			ctxs = contextProvider()
+		}
+
+		user := m.GetUser(userID)
+		if user == nil {
+			return permission.Undefined
 		}
 
 		res := m.PermissionValue(user, perm, ctxs)

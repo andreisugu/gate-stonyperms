@@ -70,8 +70,8 @@ var Plugin = proxy.Plugin{
 				subj := e.Subject()
 				if pl, ok := subj.(proxy.Player); ok {
 					uid := uuid.UUID(pl.ID())
-					user := mgr.GetOrCreateUser(uid, pl.Username())
-					e.SetFunc(mgr.GatePermissionFunc(user, func() map[string]string {
+					_ = mgr.GetOrCreateUser(uid, pl.Username())
+					e.SetFunc(mgr.GatePermissionFunc(uid, func() map[string]string {
 						ctxs := make(map[string]string)
 						if cfg.ApplyServerContexts {
 							if val, ok := serverContexts.Load(pl.ID()); ok {
