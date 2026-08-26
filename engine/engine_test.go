@@ -148,3 +148,32 @@ func TestPermissionEngineExpiration(t *testing.T) {
 		t.Fatalf("expected True for active temp node, got %v", res)
 	}
 }
+
+func TestHigherGroupWildcardOverridesLowerGroupExactNegation(t *testing.T) {
+	eng := New()
+
+	defaultGroup := model.NewGroup("default", 0)
+	defaultGroup.AddNode(model.NewNode("gate.command.send", false)) // negated send on default
+
+	adminGroup := model.NewGroup("admin", 100)
+	adminGroup.AddNode(model.NewNode("gate.*", true)) // admin wildcard
+
+	groups := map[string]*model.Group{
+		"default": defaultGroup,
+		"admin":   adminGroup,
+	}
+
+	u := model.NewUser(uuid.New(), "AdminUser")
+	u.PrimaryGroup = "default"
+	u.AddParent(model.NewInheritance("admin"))
+
+	// Evaluating gate.command.send for an admin user:
+	// Admin group (weight 100) has gate.* = true
+	// Default group (weight 0) has gate.command.send = false
+	// Expected: True, because admin group has higher weight!
+	res := eng.Evaluate(u, groups, "gate.command.send", nil)
+	if res.Result != model.True {
+		t.Fatalf("expected True from admin group wildcard, got %v (source: %s)", res.Result, res.Source)
+	}
+}
+

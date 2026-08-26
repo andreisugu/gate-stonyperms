@@ -120,9 +120,9 @@ func (e *Engine) Evaluate(user *model.User, groups map[string]*model.Group, targ
 	// 3. Resolve Inherited Groups (sorted by Weight descending)
 	resolvedGroups := e.ResolveInheritedGroups(user, groups, contexts, now)
 
-	// 4. Evaluate Groups in Weight Order
-	// First pass: Group Exact Matches
+	// 4. Evaluate Groups in Weight Order (Higher weight group completely overrides lower weight group)
 	for _, g := range resolvedGroups {
+		// 4a. Check exact match in group g
 		for _, node := range g.Nodes {
 			if node.IsExpired(now) || !node.MatchesContext(contexts) {
 				continue
@@ -139,10 +139,8 @@ func (e *Engine) Evaluate(user *model.User, groups map[string]*model.Group, targ
 				}
 			}
 		}
-	}
 
-	// Second pass: Group Wildcard Matches
-	for _, g := range resolvedGroups {
+		// 4b. Check best wildcard match in group g
 		var bestGroupWildcard *model.Node
 		for _, node := range g.Nodes {
 			if node.IsExpired(now) || !node.MatchesContext(contexts) {
@@ -181,8 +179,9 @@ func (e *Engine) GroupPermissionValue(group *model.Group, groups map[string]*mod
 
 	resolved := e.ResolveGroupHierarchy(group, groups, contexts, now)
 
-	// Exact matches first
+	// Evaluate in weight descending order
 	for _, g := range resolved {
+		// Exact match first within group
 		for _, node := range g.Nodes {
 			if node.IsExpired(now) || !node.MatchesContext(contexts) {
 				continue
@@ -199,10 +198,8 @@ func (e *Engine) GroupPermissionValue(group *model.Group, groups map[string]*mod
 				}
 			}
 		}
-	}
 
-	// Wildcard matches second
-	for _, g := range resolved {
+		// Wildcard match second within group
 		var best *model.Node
 		for _, node := range g.Nodes {
 			if node.IsExpired(now) || !node.MatchesContext(contexts) {
