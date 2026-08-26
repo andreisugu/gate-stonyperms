@@ -194,6 +194,8 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			"stonyperms.*",
 			"simplewhitelist.admin",
 			"simplewhitelist.bypass",
+			"simpleblacklist.admin",
+			"simpleblacklist.bypass",
 			"bettertab.admin",
 			"bettertab.name",
 			"bettertab.name.color",
