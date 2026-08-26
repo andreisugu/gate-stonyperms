@@ -109,10 +109,31 @@ func PageButton(label, command, hoverText string) c.Component {
 // Prefix returns the standard StonyPerms [SP] message prefix.
 const Prefix = "&6[SP]&r "
 
-// Header formats a LuckPerms-style section header.
+// stripColor removes Minecraft formatting codes (& and §) to calculate visible character width.
+func stripColor(s string) string {
+	var sb strings.Builder
+	for i := 0; i < len(s); i++ {
+		if (s[i] == '&' || s[i] == '§') && i+1 < len(s) {
+			i++ // skip the color code
+			continue
+		}
+		sb.WriteByte(s[i])
+	}
+	return sb.String()
+}
+
+// Header formats a LuckPerms-style section header fitting Minecraft's standard chat width (~48-52 chars).
 func Header(title string) string {
-	line := strings.Repeat("=", 16)
-	return fmt.Sprintf("&b%s &e&l%s &b%s&r", line, title, line)
+	visibleLen := len(stripColor(title))
+	paddingLen := (48 - visibleLen - 2) / 2
+	if paddingLen < 3 {
+		paddingLen = 3
+	}
+	if paddingLen > 8 {
+		paddingLen = 8
+	}
+	bars := strings.Repeat("=", paddingLen)
+	return fmt.Sprintf("&b%s &e&l%s &b%s&r", bars, title, bars)
 }
 
 // SubHeader formats a subsection line.
@@ -122,7 +143,7 @@ func SubHeader(title string) string {
 
 // Separator returns a horizontal divider bar.
 func Separator() string {
-	return "&8" + strings.Repeat("-", 42) + "&r"
+	return "&8" + strings.Repeat("-", 40) + "&r"
 }
 
 // FormatBool returns colored true/false string.

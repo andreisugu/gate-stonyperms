@@ -57,8 +57,8 @@ func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
 
 	case 2:
 		components = append(components,
-			MsgPlain(Header("StonyPerms Commands (Page 2/4 - User Management)")),
-			MsgPlain("&eBase Syntax:&r &b/sp user <user> <subcommand>&r  &7(Click command to insert into chat)&r"),
+			MsgPlain(Header("StonyPerms Commands (Page 2/4 - Users)")),
+			MsgPlain("&eBase Syntax:&r &b/sp user <user> <subcommand>&r  &7(Click to insert)&r"),
 			MsgPlain(Separator()),
 			ClickableCmd("&b/sp user <user> info&r", "/sp user ", "Display user UUID, primary group, parents, and nodes"),
 			ClickableCmd("&b/sp user <user> permission set <node> [true/false] [context...]&r", "/sp user ", "Set permission node"),
@@ -84,8 +84,8 @@ func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
 
 	case 3:
 		components = append(components,
-			MsgPlain(Header("StonyPerms Commands (Page 3/4 - Group Management)")),
-			MsgPlain("&eBase Syntax:&r &b/sp group <group> <subcommand>&r  &7(Click command to insert into chat)&r"),
+			MsgPlain(Header("StonyPerms Commands (Page 3/4 - Groups)")),
+			MsgPlain("&eBase Syntax:&r &b/sp group <group> <subcommand>&r  &7(Click to insert)&r"),
 			MsgPlain(Separator()),
 			ClickableCmd("&b/sp group <group> info&r", "/sp group ", "Display group details, display name, weight, and nodes"),
 			ClickableCmd("&b/sp group <group> setweight <weight>&r", "/sp group ", "Set group weight priority"),
@@ -108,7 +108,7 @@ func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
 
 	case 4:
 		components = append(components,
-			MsgPlain(Header("StonyPerms Commands (Page 4/4 - Tracks & Audit Logs)")),
+			MsgPlain(Header("StonyPerms Commands (Page 4/4 - Tracks/Logs)")),
 			MsgPlain("&eTrack Commands:&r &b/sp track <track> <subcommand>&r"),
 			ClickableCmd("&b/sp track <track> info&r", "/sp track ", "View progression sequence of groups in track"),
 			ClickableCmd("&b/sp track <track> append <group>&r", "/sp track ", "Append a group to end of track"),
