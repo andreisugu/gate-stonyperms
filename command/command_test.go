@@ -3,6 +3,7 @@ package command
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -184,6 +185,21 @@ func TestSuggestionsExactRange(t *testing.T) {
 
 	suggester := buildSuggestions(nil, mgr)
 
+	// Case 0: "/sp " -> should suggest root subcommands (user, group, info, etc.) starting at index 4
+	builder0 := &brigodier.SuggestionsBuilder{
+		Input:          "/sp ",
+		InputLowerCase: "/sp ",
+		Start:          4,
+		Remaining:      "",
+	}
+	res0 := suggester(nil, builder0)
+	if len(res0.Suggestions) == 0 {
+		t.Fatalf("expected suggestions for root '/sp '")
+	}
+	if res0.Range.Start != 4 {
+		t.Fatalf("expected root suggestion Range.Start to be 4, got %d", res0.Range.Start)
+	}
+
 	// Case 1: "/sp user " -> should suggest "RestlessStone" starting at index 9 (after "user ")
 	builder1 := &brigodier.SuggestionsBuilder{
 		Input:          "/sp user ",
@@ -291,3 +307,22 @@ func TestSuggestionsExactRange(t *testing.T) {
 		t.Fatalf("expected context suggestions starting with 'server=', got %v", res8.Suggestions)
 	}
 }
+
+func TestHelpPagesClickable(t *testing.T) {
+	mgr, cleanup := setupTestManager(t)
+	defer cleanup()
+
+	src := &dummySource{}
+
+	for page := 1; page <= 4; page++ {
+		src.messages = nil
+		err := Dispatch(mgr, src, []string{"help", strconv.Itoa(page)})
+		if err != nil {
+			t.Fatalf("help page %d failed: %v", page, err)
+		}
+		if len(src.messages) == 0 {
+			t.Fatalf("help page %d returned no messages", page)
+		}
+	}
+}
+
