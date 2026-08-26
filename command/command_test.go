@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"go.minekube.com/brigodier"
 	c "go.minekube.com/common/minecraft/component"
 	"go.minekube.com/gate/pkg/command"
 	"go.minekube.com/gate/pkg/util/permission"
@@ -170,5 +171,63 @@ func TestCommandDispatchFullFlow(t *testing.T) {
 	}
 	if !mgr.HasPermission(u, "gate.chat.color", nil) {
 		t.Fatalf("expected user Andrei to have direct gate.chat.color")
+	}
+}
+
+func TestSuggestionsExactRange(t *testing.T) {
+	mgr, cleanup := setupTestManager(t)
+	defer cleanup()
+
+	// Provision user "RestlessStone"
+	_ = mgr.GetOrCreateUser([16]byte{1, 2, 3, 4}, "RestlessStone")
+
+	suggester := buildSuggestions(nil, mgr)
+
+	// Case 1: "/sp user " -> should suggest "RestlessStone" starting at index 9 (after "user ")
+	builder1 := &brigodier.SuggestionsBuilder{
+		Input:          "/sp user ",
+		InputLowerCase: "/sp user ",
+		Start:          4, // start of args
+		Remaining:      "user ",
+	}
+	res1 := suggester(nil, builder1)
+	if len(res1.Suggestions) == 0 {
+		t.Fatalf("expected suggestions for '/sp user '")
+	}
+	if res1.Range.Start != 9 {
+		t.Fatalf("expected suggestion Range.Start to be 9, got %d", res1.Range.Start)
+	}
+
+	// Case 2: "/sp group " -> should suggest "admin" starting at index 10 (after "group ")
+	builder2 := &brigodier.SuggestionsBuilder{
+		Input:          "/sp group ",
+		InputLowerCase: "/sp group ",
+		Start:          4,
+		Remaining:      "group ",
+	}
+	res2 := suggester(nil, builder2)
+	if len(res2.Suggestions) == 0 {
+		t.Fatalf("expected suggestions for '/sp group '")
+	}
+	if res2.Range.Start != 10 {
+		t.Fatalf("expected suggestion Range.Start to be 10, got %d", res2.Range.Start)
+	}
+
+	// Case 3: "/sp user Rest" -> should suggest "RestlessStone" replacing from index 9 to 13
+	builder3 := &brigodier.SuggestionsBuilder{
+		Input:          "/sp user Rest",
+		InputLowerCase: "/sp user rest",
+		Start:          4,
+		Remaining:      "user Rest",
+	}
+	res3 := suggester(nil, builder3)
+	if len(res3.Suggestions) == 0 {
+		t.Fatalf("expected suggestions for '/sp user Rest'")
+	}
+	if res3.Range.Start != 9 || res3.Range.End != 13 {
+		t.Fatalf("expected suggestion Range {9, 13}, got {%d, %d}", res3.Range.Start, res3.Range.End)
+	}
+	if res3.Suggestions[0].Text != "RestlessStone" {
+		t.Fatalf("expected suggestion text 'RestlessStone', got %q", res3.Suggestions[0].Text)
 	}
 }

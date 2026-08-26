@@ -130,136 +130,185 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 		args := strings.Fields(remaining)
 		trailingSpace := strings.HasSuffix(remaining, " ")
 
+		// Calculate exact replacement range for the current word being typed/completed
+		var wordStart int
+		var currentWordPrefix string
+
+		if trailingSpace {
+			wordStart = len(builder.Input)
+			currentWordPrefix = ""
+		} else {
+			lastSpace := strings.LastIndex(remaining, " ")
+			if lastSpace >= 0 {
+				wordStart = builder.Start + lastSpace + 1
+				currentWordPrefix = strings.ToLower(remaining[lastSpace+1:])
+			} else {
+				wordStart = builder.Start
+				currentWordPrefix = strings.ToLower(remaining)
+			}
+		}
+
 		argCount := len(args)
 		if trailingSpace {
 			argCount++
 		}
 
+		var candidates []string
+
 		switch argCount {
 		case 1:
-			// Suggest root subcommands
-			roots := []string{
+			candidates = []string{
 				"user", "group", "track", "info", "sync", "check", "verbose",
 				"creategroup", "deletegroup", "listgroups", "createtrack", "deletetrack", "listtracks", "log",
-			}
-			prefix := ""
-			if len(args) > 0 && !trailingSpace {
-				prefix = strings.ToLower(args[0])
-			}
-			for _, r := range roots {
-				if strings.HasPrefix(r, prefix) {
-					builder.Suggest(r)
-				}
 			}
 
 		case 2:
 			root := strings.ToLower(args[0])
-			prefix := ""
-			if len(args) > 1 && !trailingSpace {
-				prefix = strings.ToLower(args[1])
-			}
-
-			if root == "user" || root == "u" {
-				// Suggest online players
+			switch root {
+			case "user", "u":
 				if p != nil {
 					for _, pl := range p.Players() {
-						name := pl.Username()
-						if strings.HasPrefix(strings.ToLower(name), prefix) {
-							builder.Suggest(name)
-						}
+						candidates = append(candidates, pl.Username())
 					}
 				}
-			} else if root == "group" || root == "g" || root == "deletegroup" {
+				for _, u := range mgr.GetGroupMembers("default") {
+					candidates = append(candidates, u.Username)
+				}
+			case "group", "g", "deletegroup":
 				for _, g := range mgr.GetGroups() {
-					if strings.HasPrefix(g.Name, prefix) {
-						builder.Suggest(g.Name)
-					}
+					candidates = append(candidates, g.Name)
 				}
-			} else if root == "track" || root == "t" || root == "deletetrack" {
+			case "track", "t", "deletetrack":
 				for _, t := range mgr.GetTracks() {
-					if strings.HasPrefix(t.Name, prefix) {
-						builder.Suggest(t.Name)
-					}
+					candidates = append(candidates, t.Name)
 				}
-			} else if root == "verbose" || root == "v" {
-				for _, v := range []string{"on", "off", "record"} {
-					if strings.HasPrefix(v, prefix) {
-						builder.Suggest(v)
-					}
-				}
-			} else if root == "log" || root == "logs" {
-				for _, l := range []string{"recent", "search", "userhistory", "grouphistory", "trackhistory"} {
-					if strings.HasPrefix(l, prefix) {
-						builder.Suggest(l)
+			case "verbose", "v":
+				candidates = []string{"on", "off", "record"}
+			case "log", "logs":
+				candidates = []string{"recent", "search", "userhistory", "grouphistory", "trackhistory"}
+			case "check":
+				if p != nil {
+					for _, pl := range p.Players() {
+						candidates = append(candidates, pl.Username())
 					}
 				}
 			}
 
 		case 3:
 			root := strings.ToLower(args[0])
-			prefix := ""
-			if len(args) > 2 && !trailingSpace {
-				prefix = strings.ToLower(args[2])
-			}
-
-			if root == "user" || root == "u" {
-				subs := []string{"info", "permission", "parent", "meta", "promote", "demote", "showtracks", "clear", "clone"}
-				for _, s := range subs {
-					if strings.HasPrefix(s, prefix) {
-						builder.Suggest(s)
-					}
-				}
-			} else if root == "group" || root == "g" {
-				subs := []string{"info", "permission", "parent", "meta", "setweight", "setdisplayname", "rename", "clone", "listmembers", "showtracks", "clear"}
-				for _, s := range subs {
-					if strings.HasPrefix(s, prefix) {
-						builder.Suggest(s)
-					}
-				}
-			} else if root == "track" || root == "t" {
-				subs := []string{"info", "append", "insert", "remove", "clear", "rename"}
-				for _, s := range subs {
-					if strings.HasPrefix(s, prefix) {
-						builder.Suggest(s)
-					}
-				}
+			switch root {
+			case "user", "u":
+				candidates = []string{"info", "permission", "parent", "meta", "promote", "demote", "showtracks", "clear", "clone"}
+			case "group", "g":
+				candidates = []string{"info", "permission", "parent", "meta", "setweight", "setdisplayname", "rename", "clone", "listmembers", "showtracks", "clear"}
+			case "track", "t":
+				candidates = []string{"info", "append", "insert", "remove", "clear", "rename"}
+			case "check":
+				candidates = []string{"gate.command.server", "gate.command.send", "gate.command.glist", "gate.*", "*", "stonyperms.admin"}
 			}
 
 		case 4:
 			root := strings.ToLower(args[0])
 			sub := strings.ToLower(args[2])
-			prefix := ""
-			if len(args) > 3 && !trailingSpace {
-				prefix = strings.ToLower(args[3])
+			if root == "user" || root == "u" || root == "group" || root == "g" {
+				switch sub {
+				case "permission", "perm", "p":
+					candidates = []string{"set", "unset", "settemp", "unsettemp", "check", "clear"}
+				case "parent", "parents":
+					candidates = []string{"info", "add", "set", "remove", "switchprimarygroup", "addtemp", "clear"}
+				case "meta", "m":
+					candidates = []string{"info", "set", "unset", "setprefix", "setsuffix", "removeprefix", "removesuffix", "clear"}
+				case "promote", "demote":
+					for _, t := range mgr.GetTracks() {
+						candidates = append(candidates, t.Name)
+					}
+				}
+			} else if root == "track" || root == "t" {
+				if sub == "append" || sub == "insert" || sub == "remove" {
+					for _, g := range mgr.GetGroups() {
+						candidates = append(candidates, g.Name)
+					}
+				}
 			}
 
+		case 5:
+			root := strings.ToLower(args[0])
+			sub := strings.ToLower(args[2])
+			action := strings.ToLower(args[3])
 			if (root == "user" || root == "group") && (sub == "permission" || sub == "perm" || sub == "p") {
-				for _, a := range []string{"set", "unset", "settemp", "unsettemp", "check", "clear"} {
-					if strings.HasPrefix(a, prefix) {
-						builder.Suggest(a)
+				switch action {
+				case "set", "settemp", "unset", "unsettemp", "check":
+					candidates = []string{
+						"gate.command.server",
+						"gate.command.send",
+						"gate.command.glist",
+						"gate.command.ping",
+						"gate.*",
+						"stonyperms.admin",
+						"stonyperms.user",
+						"stonyperms.group",
+						"*",
 					}
 				}
 			} else if (root == "user" || root == "group") && (sub == "parent" || sub == "parents") {
-				for _, a := range []string{"info", "add", "set", "remove", "switchprimarygroup", "addtemp", "clear"} {
-					if strings.HasPrefix(a, prefix) {
-						builder.Suggest(a)
+				switch action {
+				case "add", "set", "remove", "switchprimarygroup", "addtemp":
+					for _, g := range mgr.GetGroups() {
+						candidates = append(candidates, g.Name)
 					}
 				}
-			} else if (root == "user" || root == "group") && (sub == "meta" || sub == "m") {
-				for _, a := range []string{"info", "set", "unset", "setprefix", "setsuffix", "removeprefix", "removesuffix", "clear"} {
-					if strings.HasPrefix(a, prefix) {
-						builder.Suggest(a)
-					}
+			}
+
+		case 6:
+			root := strings.ToLower(args[0])
+			sub := strings.ToLower(args[2])
+			action := strings.ToLower(args[3])
+			if (root == "user" || root == "group") && (sub == "permission" || sub == "perm" || sub == "p") {
+				if action == "set" || action == "settemp" {
+					candidates = []string{"true", "false"}
 				}
-			} else if root == "user" && (sub == "promote" || sub == "demote") {
-				for _, t := range mgr.GetTracks() {
-					if strings.HasPrefix(t.Name, prefix) {
-						builder.Suggest(t.Name)
+			} else if (root == "user" || root == "group") && (sub == "parent" || sub == "parents") {
+				if action == "addtemp" {
+					candidates = []string{"10m", "1h", "12h", "1d", "7d", "30d"}
+				}
+			}
+
+		case 7:
+			root := strings.ToLower(args[0])
+			sub := strings.ToLower(args[2])
+			action := strings.ToLower(args[3])
+			if (root == "user" || root == "group") && (sub == "permission" || sub == "perm" || sub == "p") {
+				if action == "settemp" {
+					candidates = []string{"10m", "1h", "12h", "1d", "7d", "30d"}
+				} else if action == "set" {
+					if p != nil {
+						for _, s := range p.Servers() {
+							candidates = append(candidates, "server="+s.ServerInfo().Name())
+						}
 					}
 				}
 			}
 		}
 
-		return builder.Build()
+		// Filter candidates and build suggestions with the exact word replacement range
+		var results []*brigodier.Suggestion
+		seen := make(map[string]struct{})
+		for _, c := range candidates {
+			if _, exists := seen[c]; exists {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(c), currentWordPrefix) {
+				seen[c] = struct{}{}
+				results = append(results, &brigodier.Suggestion{
+					Range: brigodier.StringRange{
+						Start: wordStart,
+						End:   len(builder.Input),
+					},
+					Text: c,
+				})
+			}
+		}
+
+		return brigodier.CreateSuggestion(builder.Input, results)
 	}
 }
