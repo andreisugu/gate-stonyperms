@@ -1,19 +1,32 @@
-# Binaries
-gate
+# Binaries for programs and plugins
 *.exe
+*.exe~
 *.dll
 *.so
 *.dylib
+gate
 
-# Test artifacts
+# Test binary, built with `go test -c`
 *.test
+
+# Output of the go coverage tool
 *.out
+coverage.*
+*.coverprofile
+profile.cov
 
-# Storage data
-config/stonyperms/
+# Dependency directories
+# vendor/
 
-# OS / Editor
-.DS_Store
+# Go workspace file
+go.work
+go.work.sum
+
+# Environment files
+.env
+
+# Editor & IDE artifacts
 .idea/
 .vscode/
 *.swp
+.DS_Store
