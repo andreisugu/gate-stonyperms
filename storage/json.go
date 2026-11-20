@@ -208,8 +208,9 @@ func (js *JSONStorage) SaveGroup(group *model.Group) error {
 	}
 
 	name := strings.ToLower(group.Name)
-	group.Name = name
-	groupsMap[name] = group
+	stored := *group
+	stored.Name = name
+	groupsMap[name] = &stored
 
 	return js.atomicWriteJSON(js.groupsPath(), groupsMap)
 }
@@ -243,8 +244,9 @@ func (js *JSONStorage) SaveTrack(track *model.Track) error {
 	}
 
 	name := strings.ToLower(track.Name)
-	track.Name = name
-	tracksMap[name] = track
+	stored := *track
+	stored.Name = name
+	tracksMap[name] = &stored
 
 	return js.atomicWriteJSON(js.tracksPath(), tracksMap)
 }

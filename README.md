@@ -250,6 +250,24 @@ func CheckPlayer(player proxy.Player) {
 
 ---
 
+## 🌉 Read-only HTTP Bridge API
+
+StonyPerms can expose a read-only JSON API for Paper and Fabric permission
+adapters, so backends can use the proxy as their source of truth without
+sharing storage or reimplementing inheritance.
+
+```toml
+api_enabled = true
+api_listen = "127.0.0.1:8737"
+api_token_file = "config/stonyperms-api.token"
+api_snapshot_ttl_seconds = 30
+```
+
+The API is disabled by default, binds to loopback, requires a bearer token,
+and never mutates data. See [`docs/http-api.md`](docs/http-api.md) for the
+contract, security model, and examples. The consumer implementation lives at
+[`andreisugu/stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge).
+
 ## 📦 Bundling with Gate
 
 Add `github.com/andreisugu/gate-stonyperms` to your `plugins.txt` or bundle in `main.go`:
