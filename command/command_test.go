@@ -380,4 +380,28 @@ func TestGranularPermissionEnforcement(t *testing.T) {
 	}
 }
 
+func TestGroupDispatchMutatesACopy(t *testing.T) {
+	mgr, cleanup := setupTestManager(t)
+	defer cleanup()
 
+	published, err := mgr.CreateGroup("vip", 10, "")
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	old := mgr.GetGroup("vip")
+	if old != published {
+		t.Fatal("expected the published group pointer")
+	}
+
+	src := &dummySource{}
+	if err := HandleGroupDispatch(mgr, src, []string{"vip", "setweight", "50"}); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	if old.Weight != 10 {
+		t.Fatal("command mutated the published group record")
+	}
+	if got := mgr.GetGroup("vip"); got == nil || got.Weight != 50 {
+		t.Fatalf("saved copy not published, got %+v", got)
+	}
+}

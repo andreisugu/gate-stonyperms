@@ -21,7 +21,8 @@ func HandleGroupDispatch(mgr *manager.Manager, src command.Source, args []string
 	groupName := strings.ToLower(args[0])
 	subArgs := args[1:]
 
-	group := mgr.GetGroup(groupName)
+	// Command handlers mutate a copy, never the published record.
+	group := mgr.GetGroupCopy(groupName)
 	if group == nil {
 		return src.SendMessage(Msg(Prefix+"&cGroup '&e%s&c' does not exist. Use &b/sp creategroup %s&c to create it.&r", groupName, groupName))
 	}
@@ -111,7 +112,7 @@ func HandleGroupDispatch(mgr *manager.Manager, src command.Source, args []string
 		return src.SendMessage(Msg(Prefix+"&aCleared all data for group &e%s&a.&r", group.Name))
 
 	default:
-		return src.SendMessage(Msg(Prefix + "&cUnknown group subcommand: %s. Available: info, permission, parent, meta, setweight, setdisplayname, rename, clone, listmembers, clear.&r", subCmd))
+		return src.SendMessage(Msg(Prefix+"&cUnknown group subcommand: %s. Available: info, permission, parent, meta, setweight, setdisplayname, rename, clone, listmembers, clear.&r", subCmd))
 	}
 }
 
@@ -292,7 +293,7 @@ func handleGroupPermission(mgr *manager.Manager, src command.Source, g *model.Gr
 		return src.SendMessage(Msg(Prefix+"&aCleared permissions for group &e%s&a.&r", g.Name))
 
 	default:
-		return src.SendMessage(Msg(Prefix + "&cUnknown permission action: %s. Available: set, unset, settemp, unsettemp, check, clear.&r", action))
+		return src.SendMessage(Msg(Prefix+"&cUnknown permission action: %s. Available: set, unset, settemp, unsettemp, check, clear.&r", action))
 	}
 }
 
