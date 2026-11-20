@@ -19,7 +19,8 @@ func HandleTrackDispatch(mgr *manager.Manager, src command.Source, args []string
 	trackName := strings.ToLower(args[0])
 	subArgs := args[1:]
 
-	track := mgr.GetTrack(trackName)
+	// Command handlers mutate a copy, never the published record.
+	track := mgr.GetTrackCopy(trackName)
 	if track == nil {
 		return src.SendMessage(Msg(Prefix+"&cTrack '&e%s&c' does not exist. Use &b/sp createtrack %s&c to create it.&r", trackName, trackName))
 	}

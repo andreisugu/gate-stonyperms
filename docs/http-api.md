@@ -131,9 +131,12 @@ That is the same order as `engine.Evaluate` in this repository. Nodes that are
 expired or do not match the requested contexts are omitted. `expiry` is Unix
 seconds and omitted for permanent nodes.
 
-`ETag` is `"sp-<revision>"`. Send `If-None-Match` to get `304 Not Modified`.
-Any user/group change increments the revision. Snapshots are context-specific;
-include the context in your cache key.
+`ETag` is `"sp-<generation>-<revision>-<fingerprint>"`. The generation changes
+on every proxy restart; the fingerprint covers the effective snapshot,
+including node/parent expiry, so a temporary grant cannot keep a stale 304
+between cleanup ticks. Send `If-None-Match` to get `304 Not Modified` only when
+the effective state is unchanged. Snapshots are context-specific; include the
+context in your cache key.
 
 ### POST /v1/check
 

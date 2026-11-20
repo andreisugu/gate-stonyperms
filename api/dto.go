@@ -1,6 +1,10 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/andreisugu/gate-stonyperms/manager"
@@ -134,4 +138,26 @@ func newSnapshotResponse(eff *manager.EffectiveUser, found bool, revision uint64
 		Groups: groups,
 		Nodes:  nodes,
 	}
+}
+
+// snapshotETag combines a restart generation, the manager revision, and a
+// fingerprint of the effective snapshot. The fingerprint is what makes
+// temporary-node/parent expiry change the validator between cleanup ticks;
+// the generation prevents a restarted proxy from reusing an old validator.
+func snapshotETag(generation string, revision uint64, snapshot snapshotResponse) string {
+	payload := struct {
+		User   userDTO    `json:"user"`
+		Groups []groupDTO `json:"groups"`
+		Nodes  []nodeDTO  `json:"nodes"`
+	}{
+		User:   snapshot.User,
+		Groups: snapshot.Groups,
+		Nodes:  snapshot.Nodes,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Sprintf(`"sp-%s-%d"`, generation, revision)
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf(`"sp-%s-%d-%s"`, generation, revision, hex.EncodeToString(sum[:8]))
 }

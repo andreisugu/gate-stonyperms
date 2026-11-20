@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -281,9 +283,99 @@ func TestGroupsEndpoints(t *testing.T) {
 	if rec := doRequest(t, h, http.MethodGet, "/v1/groups/missing", testToken, nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("missing group status = %d, want 404", rec.Code)
 	}
-	if rec := doRequest(t, h, http.MethodGet, "/v1/groups/bad!name", testToken, nil); rec.Code != http.StatusBadRequest {
-		t.Fatalf("invalid group status = %d, want 400", rec.Code)
+
+	// The manager allows names such as "vip+"; the API must not be stricter.
+	if _, err := srv.mgr.CreateGroup("vip+", 50, ""); err != nil {
+		t.Fatalf("create vip+: %v", err)
 	}
+	if rec := doRequest(t, h, http.MethodGet, "/v1/groups/vip+", testToken, nil); rec.Code != http.StatusOK {
+		t.Fatalf("vip+ group status = %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// A non-matching special name is a lookup miss, not a validation error.
+	if rec := doRequest(t, h, http.MethodGet, "/v1/groups/bad!name", testToken, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown special group status = %d, want 404", rec.Code)
+	}
+}
+
+func TestCheckRejectsTrailingJSON(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	id := uuid.New()
+	valid := `{"uuid":"` + id.String() + `","permission":"x"}`
+
+	for _, body := range []string{
+		valid + ` trailing`,
+		valid + `{"partial":`,
+		valid + ` {}`,
+	} {
+		if rec := doRequest(t, h, http.MethodPost, "/v1/check", testToken, []byte(body)); rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %q status = %d, want 400", body, rec.Code)
+		}
+	}
+}
+
+func TestSnapshotETagFingerprintAndGeneration(t *testing.T) {
+	base := snapshotResponse{
+		User:   userDTO{UUID: "00000000-0000-0000-0000-000000000001", Username: "Steve"},
+		Groups: []groupDTO{{Name: "default", Weight: 0}},
+		Nodes:  []nodeDTO{{Key: "temp.node", Value: true, Expiry: 100, Source: "user", User: true}},
+	}
+	first := snapshotETag("generation-a", 7, base)
+
+	base.Nodes[0].Expiry = 200
+	second := snapshotETag("generation-a", 7, base)
+	if first == second {
+		t.Fatal("ETag did not change when a node expiry changed")
+	}
+
+	base.Nodes[0].Expiry = 100
+	if first != snapshotETag("generation-a", 7, base) {
+		t.Fatal("ETag changed for identical effective state")
+	}
+	if first == snapshotETag("generation-b", 7, base) {
+		t.Fatal("ETag reused across process generations")
+	}
+}
+
+func TestStartRejectsInvalidTLSWithoutLeakingPort(t *testing.T) {
+	_, mgr := newTestServer(t)
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certPath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, []byte("not a key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := probe.Addr().String()
+	_ = probe.Close()
+
+	srv, err := New(mgr, Options{
+		Listen:      addr,
+		Token:       testToken,
+		TLSCertFile: certPath,
+		TLSKeyFile:  keyPath,
+	})
+	if err != nil {
+		t.Fatalf("new api: %v", err)
+	}
+	if err := srv.Start(context.Background()); err == nil {
+		t.Fatal("expected invalid TLS certificate to fail startup")
+	}
+
+	// A failed certificate load must not leave the address bound.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("address still bound after TLS setup failure: %v", err)
+	}
+	_ = ln.Close()
 }
 
 func TestRejectsRemoteBindWithoutOptIn(t *testing.T) {

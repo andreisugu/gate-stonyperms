@@ -5,9 +5,11 @@ package api
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -36,7 +38,6 @@ const (
 )
 
 var (
-	groupNamePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	contextKeyPattern  = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
 	validBearerPrefix  = "bearer "
 	loopbackHosts      = map[string]bool{"localhost": true}
@@ -124,6 +125,18 @@ func (s *Server) Handler() http.Handler {
 // Start binds the configured address and serves in the background. The context
 // controls graceful shutdown; canceling it stops the server.
 func (s *Server) Start(ctx context.Context) error {
+	var tlsConfig *tls.Config
+	if s.opts.TLSCertFile != "" {
+		cert, err := tls.LoadX509KeyPair(s.opts.TLSCertFile, s.opts.TLSKeyFile)
+		if err != nil {
+			return fmt.Errorf("api: load TLS certificate: %w", err)
+		}
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+	}
+
 	ln, err := net.Listen("tcp", s.opts.Listen)
 	if err != nil {
 		return fmt.Errorf("api: listen %s: %w", s.opts.Listen, err)
@@ -139,9 +152,10 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	go func() {
+		defer ln.Close()
 		var serveErr error
-		if s.opts.TLSCertFile != "" {
-			serveErr = s.http.ServeTLS(ln, s.opts.TLSCertFile, s.opts.TLSKeyFile)
+		if tlsConfig != nil {
+			serveErr = s.http.Serve(tls.NewListener(ln, tlsConfig))
 		} else {
 			serveErr = s.http.Serve(ln)
 		}
@@ -240,9 +254,9 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	revision := s.mgr.Revision()
-	eff, found := s.mgr.EffectiveUser(id, contexts, s.opts.DefaultGroup)
-	etag := fmt.Sprintf(`"sp-%d"`, revision)
+	eff, found, revision := s.mgr.EffectiveUser(id, contexts, s.opts.DefaultGroup)
+	snapshot := newSnapshotResponse(eff, found, revision, s.opts.SnapshotTTL)
+	etag := snapshotETag(s.mgr.Generation(), revision, snapshot)
 	w.Header().Set("ETag", etag)
 	w.Header().Set("X-StonyPerms-Revision", fmt.Sprintf("%d", revision))
 	w.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
@@ -252,7 +266,7 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, newSnapshotResponse(eff, found, revision, s.opts.SnapshotTTL))
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
@@ -265,7 +279,7 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_body", "body must be a valid check request")
 		return
 	}
-	if dec.Decode(&struct{}{}) == nil {
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid_body", "body must contain exactly one JSON object")
 		return
 	}
@@ -285,33 +299,34 @@ func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	value, source := s.mgr.EvaluateUser(id, permission, req.Contexts, s.opts.DefaultGroup)
+	value, source, revision := s.mgr.EvaluateUser(id, permission, req.Contexts, s.opts.DefaultGroup)
 	writeJSON(w, http.StatusOK, checkResponse{
 		Value:    value.String(),
 		Source:   source,
-		Revision: s.mgr.Revision(),
+		Revision: revision,
 	})
 }
 
 func (s *Server) handleGroups(w http.ResponseWriter, _ *http.Request) {
+	groups, revision := s.mgr.GroupsSnapshot()
 	writeJSON(w, http.StatusOK, groupsResponse{
-		Revision: s.mgr.Revision(),
-		Groups:   s.mgr.GroupsSnapshot(),
+		Revision: revision,
+		Groups:   groups,
 	})
 }
 
 func (s *Server) handleGroup(w http.ResponseWriter, r *http.Request) {
 	name := strings.ToLower(strings.TrimSpace(r.PathValue("name")))
-	if !groupNamePattern.MatchString(name) {
-		writeError(w, http.StatusBadRequest, "invalid_group", "invalid group name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "invalid_group", "group name cannot be empty")
 		return
 	}
-	group, ok := s.mgr.GroupSnapshot(name)
+	group, ok, revision := s.mgr.GroupSnapshot(name)
 	if !ok {
 		writeError(w, http.StatusNotFound, "group_not_found", "group does not exist")
 		return
 	}
-	writeJSON(w, http.StatusOK, groupResponse{Revision: s.mgr.Revision(), Group: group})
+	writeJSON(w, http.StatusOK, groupResponse{Revision: revision, Group: group})
 }
 
 func validateListen(addr string, allowRemote bool) error {
