@@ -22,8 +22,8 @@ func HandleUserDispatch(mgr *manager.Manager, src command.Source, args []string)
 	userQuery := args[0]
 	subArgs := args[1:]
 
-	// Find or resolve user
-	user := mgr.GetUserByName(userQuery)
+	// Command handlers mutate a copy, never the published record.
+	user := mgr.GetUserByNameCopy(userQuery)
 	if user == nil {
 		// If query is a valid UUID, create new profile on the fly
 		if parsedUUID, err := uuid.Parse(userQuery); err == nil {
@@ -33,6 +33,7 @@ func HandleUserDispatch(mgr *manager.Manager, src command.Source, args []string)
 			offlineUUID := uuid.NewMD5(uuid.NameSpaceDNS, []byte("OfflinePlayer:"+strings.ToLower(userQuery)))
 			user = mgr.GetOrCreateUser(offlineUUID, userQuery)
 		}
+		user = mgr.GetUserCopy(user.UUID)
 	}
 
 	if len(subArgs) == 0 || strings.EqualFold(subArgs[0], "info") {
@@ -65,17 +66,18 @@ func HandleUserDispatch(mgr *manager.Manager, src command.Source, args []string)
 			return src.SendMessage(Msg(Prefix + "&cUsage: /sp user <user> clone <target>&r"))
 		}
 		targetName := rest[0]
-		targetUser := mgr.GetUserByName(targetName)
+		targetUser := mgr.GetUserByNameCopy(targetName)
 		if targetUser == nil {
 			targetUUID := uuid.NewMD5(uuid.NameSpaceDNS, []byte("OfflinePlayer:"+strings.ToLower(targetName)))
 			targetUser = mgr.GetOrCreateUser(targetUUID, targetName)
+			targetUser = mgr.GetUserCopy(targetUser.UUID)
 		}
 		cloned := user.Clone(targetUser.UUID, targetUser.Username)
 		_ = mgr.SaveUser(cloned)
 		mgr.LogAction(getActorName(src), "user", targetUser.Username, fmt.Sprintf("Cloned data from %s", user.Username))
 		return src.SendMessage(Msg(Prefix+"&aSuccessfully cloned data from &e%s&a to &e%s&a!&r", user.Username, targetUser.Username))
 	default:
-		return src.SendMessage(Msg(Prefix + "&cUnknown user subcommand '&e%s&c'. Available: info, permission, parent, meta, promote, demote, clear, clone.&r", subCmd))
+		return src.SendMessage(Msg(Prefix+"&cUnknown user subcommand '&e%s&c'. Available: info, permission, parent, meta, promote, demote, clear, clone.&r", subCmd))
 	}
 }
 
@@ -241,7 +243,7 @@ func handleUserPermission(mgr *manager.Manager, src command.Source, u *model.Use
 		return src.SendMessage(Msg(Prefix+"&aCleared permissions for &e%s&a.&r", u.Username))
 
 	default:
-		return src.SendMessage(Msg(Prefix + "&cUnknown permission action: %s. Available: set, unset, settemp, unsettemp, check, clear.&r", action))
+		return src.SendMessage(Msg(Prefix+"&cUnknown permission action: %s. Available: set, unset, settemp, unsettemp, check, clear.&r", action))
 	}
 }
 

@@ -1,9 +1,12 @@
 package manager
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"go.minekube.com/gate/pkg/util/permission"
@@ -80,8 +83,12 @@ func TestManagerGatePermissionFunc(t *testing.T) {
 	defer mgr.Close()
 
 	u := mgr.GetOrCreateUser(uuid.New(), "Tester")
-	u.AddNode(model.NewNode("gate.command.server", true))
-	u.AddNode(model.NewNode("gate.command.send", false))
+	edited := mgr.GetUserCopy(u.UUID)
+	edited.AddNode(model.NewNode("gate.command.server", true))
+	edited.AddNode(model.NewNode("gate.command.send", false))
+	if err := mgr.SaveUser(edited); err != nil {
+		t.Fatalf("save user: %v", err)
+	}
 
 	permFunc := mgr.GatePermissionFunc(u.UUID, nil)
 
@@ -94,4 +101,149 @@ func TestManagerGatePermissionFunc(t *testing.T) {
 	if permFunc("gate.unknown") != permission.Undefined {
 		t.Fatalf("expected gate.unknown to be Undefined, got %v", permFunc("gate.unknown"))
 	}
+}
+
+func TestCleanupExpiredAdvancesRevision(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := storage.NewJSONStorage(filepath.Join(tmpDir, "stonyperms"))
+	mgr, err := New(store)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	defer mgr.Close()
+
+	u := mgr.GetOrCreateUser(uuid.New(), "Expiring")
+	edited := mgr.GetUserCopy(u.UUID)
+	edited.AddNode(model.Node{Key: "temp.node", Value: true, Expiry: time.Now().Add(-time.Second).Unix()})
+	if err := mgr.SaveUser(edited); err != nil {
+		t.Fatalf("save user: %v", err)
+	}
+
+	before := mgr.Revision()
+	mgr.cleanupExpired(time.Now())
+	if mgr.Revision() <= before {
+		t.Fatalf("cleanup did not advance revision: before=%d after=%d", before, mgr.Revision())
+	}
+
+	eff, _, _ := mgr.EffectiveUser(u.UUID, nil, "default")
+	for _, node := range eff.Nodes {
+		if node.Node.Key == "temp.node" {
+			t.Fatal("expired node remained in effective snapshot")
+		}
+	}
+}
+
+func TestConcurrentCommandStyleMutationAndSnapshot(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := storage.NewJSONStorage(filepath.Join(tmpDir, "stonyperms"))
+	mgr, err := New(store)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	defer mgr.Close()
+
+	id := uuid.New()
+	mgr.GetOrCreateUser(id, "Concurrent")
+	if _, err := mgr.CreateGroup("vip", 50, ""); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 150; i++ {
+			copy := mgr.GetUserCopy(id)
+			copy.AddNode(model.NewNode("race.node", i%2 == 0))
+			_ = mgr.SaveUser(copy)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 150; i++ {
+			g := mgr.GetGroupCopy("vip")
+			g.Weight = i
+			_ = mgr.SaveGroup(g)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 150; i++ {
+			_, _, _ = mgr.EffectiveUser(id, map[string]string{"server": "lobby"}, "default")
+			_, _ = mgr.GroupsSnapshot()
+			_, _, _ = mgr.EvaluateUser(id, "race.node", nil, "default")
+		}
+	}()
+	wg.Wait()
+}
+
+func TestPersistenceFailureKeepsVisibleStateAndRevision(t *testing.T) {
+	tmpDir := t.TempDir()
+	base, _ := storage.NewJSONStorage(filepath.Join(tmpDir, "stonyperms"))
+	store := failingGroupStorage{StorageProvider: base, err: errors.New("disk full")}
+	mgr, err := New(store)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	defer mgr.Close()
+
+	before := mgr.Revision()
+	if _, err := mgr.CreateGroup("persistfail", 10, ""); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	if mgr.Revision() <= before {
+		t.Fatalf("visible group change did not advance revision: before=%d after=%d", before, mgr.Revision())
+	}
+	if mgr.GetGroup("persistfail") == nil {
+		t.Fatal("group should remain visible with its new revision")
+	}
+}
+
+func TestGenerationAndCopiesAreIsolated(t *testing.T) {
+	firstDir := t.TempDir()
+	firstStore, _ := storage.NewJSONStorage(filepath.Join(firstDir, "stonyperms"))
+	first, err := New(firstStore)
+	if err != nil {
+		t.Fatalf("first manager: %v", err)
+	}
+	defer first.Close()
+
+	secondDir := t.TempDir()
+	secondStore, _ := storage.NewJSONStorage(filepath.Join(secondDir, "stonyperms"))
+	second, err := New(secondStore)
+	if err != nil {
+		t.Fatalf("second manager: %v", err)
+	}
+	defer second.Close()
+
+	if first.Generation() == "" || second.Generation() == "" {
+		t.Fatal("generation must not be empty")
+	}
+	if first.Generation() == second.Generation() {
+		t.Fatal("independent managers must not share a generation")
+	}
+
+	id := uuid.New()
+	u := first.GetOrCreateUser(id, "Isolated")
+	copy := first.GetUserCopy(id)
+	copy.AddNode(model.NewNode("only.copy", true))
+	if len(first.GetUser(id).Nodes) != 0 {
+		t.Fatal("mutating a copy changed the published user")
+	}
+	if err := first.SaveUser(copy); err != nil {
+		t.Fatalf("save copy: %v", err)
+	}
+	if len(first.GetUser(id).Nodes) != 1 {
+		t.Fatal("saved copy was not published")
+	}
+	_ = u
+}
+
+type failingGroupStorage struct {
+	storage.StorageProvider
+	err error
+}
+
+func (f failingGroupStorage) SaveGroup(*model.Group) error {
+	return f.err
 }

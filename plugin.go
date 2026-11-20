@@ -5,12 +5,14 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"github.com/robinbraemer/event"
 	"go.minekube.com/gate/pkg/edition/java/proxy"
 
+	"github.com/andreisugu/gate-stonyperms/api"
 	"github.com/andreisugu/gate-stonyperms/command"
 	"github.com/andreisugu/gate-stonyperms/manager"
 	"github.com/andreisugu/gate-stonyperms/storage"
@@ -55,6 +57,32 @@ var Plugin = proxy.Plugin{
 			return err
 		}
 		globalManager.Store(mgr)
+
+		// Start the optional read-only HTTP API used by backend adapters.
+		// A configuration error disables the API but never prevents Gate
+		// from starting with local permission enforcement intact.
+		if cfg.APIEnabled {
+			token, tokenErr := api.LoadToken(cfg.APIToken, cfg.APITokenFile)
+			if tokenErr != nil {
+				log.Error(tokenErr, "StonyPerms HTTP API not started")
+			} else {
+				apiServer, apiErr := api.New(mgr, api.Options{
+					Listen:       cfg.APIListen,
+					Token:        token,
+					AllowRemote:  cfg.APIAllowRemote,
+					TLSCertFile:  cfg.APITLSCert,
+					TLSKeyFile:   cfg.APITLSKey,
+					SnapshotTTL:  time.Duration(cfg.APISnapshotTTLSeconds) * time.Second,
+					DefaultGroup: cfg.DefaultGroup,
+					Logger:       log,
+				})
+				if apiErr != nil {
+					log.Error(apiErr, "StonyPerms HTTP API not started")
+				} else if startErr := apiServer.Start(ctx); startErr != nil {
+					log.Error(startErr, "StonyPerms HTTP API not started")
+				}
+			}
+		}
 
 		var serverContexts sync.Map
 
