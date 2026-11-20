@@ -2,6 +2,7 @@ package manager
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,45 @@ type Manager struct {
 	logs           []model.LogEntry
 	updateListener atomic.Pointer[func()]
 	stopChan       chan struct{}
+	revision       atomic.Uint64
+}
+
+// EffectiveNode is a permission node together with the entity it came from.
+// The source order is significant: user nodes always precede group nodes, and
+// groups are returned in descending weight order, mirroring engine evaluation.
+type EffectiveNode struct {
+	Node   model.Node
+	Source string // "user" or "group:<name>"
+	Weight int
+	User   bool
+}
+
+// EffectiveGroup is a lightweight, immutable view of a resolved group.
+type EffectiveGroup struct {
+	Name        string
+	DisplayName string
+	Weight      int
+}
+
+// EffectiveUser is an immutable snapshot of a user's resolved permissions for
+// one context. It is safe to use after the manager lock is released.
+type EffectiveUser struct {
+	UUID         uuid.UUID
+	Username     string
+	PrimaryGroup string
+	Synthetic    bool
+	Groups       []EffectiveGroup
+	Nodes        []EffectiveNode
+	Meta         map[string]string
+	Prefix       string
+	Suffix       string
+}
+
+// Revision returns a monotonically increasing counter that changes whenever
+// users or groups are modified. It is used for cheap cache validation by
+// external permission adapters.
+func (m *Manager) Revision() uint64 {
+	return m.revision.Load()
 }
 
 // SetUpdateListener registers a callback triggered whenever permissions, groups, or users are modified.
@@ -39,6 +79,7 @@ func (m *Manager) SetUpdateListener(listener func()) {
 }
 
 func (m *Manager) notifyUpdate() {
+	m.revision.Add(1)
 	ptr := m.updateListener.Load()
 	if ptr != nil && *ptr != nil {
 		fn := *ptr
@@ -400,6 +441,7 @@ func (m *Manager) PromoteUser(user *model.User, trackName string, actor string) 
 
 	_ = m.storage.SaveUser(user)
 	m.logActionLocked(actor, "user", user.Username, fmt.Sprintf("Promoted along track '%s' (%s -> %s)", trackName, currentGroup, nextGroup))
+	m.notifyUpdate()
 
 	return currentGroup, nextGroup, nil
 }
@@ -446,6 +488,7 @@ func (m *Manager) DemoteUser(user *model.User, trackName string, actor string) (
 
 	_ = m.storage.SaveUser(user)
 	m.logActionLocked(actor, "user", user.Username, fmt.Sprintf("Demoted along track '%s' (%s -> %s)", trackName, currentGroup, prevGroup))
+	m.notifyUpdate()
 
 	return currentGroup, prevGroup, nil
 }
@@ -538,6 +581,197 @@ func (m *Manager) GetMeta(user *model.User, key string) (string, bool) {
 	m.mu.RUnlock()
 
 	return m.engine.GetMeta(user, groupsCopy, key)
+}
+
+// EffectiveUser resolves a user's permissions for one context and returns an
+// immutable snapshot. Unknown users are resolved against defaultGroup without
+// being persisted, matching StonyPerms' first-login semantics. The second
+// return value reports whether a stored user record was found.
+func (m *Manager) EffectiveUser(id uuid.UUID, contexts map[string]string, defaultGroup string) (*EffectiveUser, bool) {
+	if defaultGroup == "" {
+		defaultGroup = "default"
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := time.Now()
+	user, found := m.users[id]
+	if !found {
+		user = model.NewUser(id, "")
+		user.PrimaryGroup = defaultGroup
+	}
+
+	resolved := m.engine.ResolveInheritedGroups(user, m.groups, contexts, now)
+	primaryGroup := user.PrimaryGroup
+	if primaryGroup == "" {
+		primaryGroup = defaultGroup
+	}
+
+	eff := &EffectiveUser{
+		UUID:         id,
+		Username:     user.Username,
+		PrimaryGroup: primaryGroup,
+		Synthetic:    !found,
+		Groups:       make([]EffectiveGroup, 0, len(resolved)),
+		Nodes:        make([]EffectiveNode, 0),
+		Meta:         make(map[string]string, len(user.Meta)),
+	}
+
+	for _, g := range resolved {
+		eff.Groups = append(eff.Groups, EffectiveGroup{
+			Name:        g.Name,
+			DisplayName: g.GetDisplayName(),
+			Weight:      g.Weight,
+		})
+	}
+
+	for _, n := range user.Nodes {
+		if n.IsExpired(now) || !n.MatchesContext(contexts) {
+			continue
+		}
+		eff.Nodes = append(eff.Nodes, EffectiveNode{
+			Node:   copyNode(n),
+			Source: "user",
+			Weight: 0,
+			User:   true,
+		})
+	}
+
+	for _, g := range resolved {
+		for _, n := range g.Nodes {
+			if n.IsExpired(now) || !n.MatchesContext(contexts) {
+				continue
+			}
+			eff.Nodes = append(eff.Nodes, EffectiveNode{
+				Node:   copyNode(n),
+				Source: "group:" + g.Name,
+				Weight: g.Weight,
+				User:   false,
+			})
+		}
+	}
+
+	for k, v := range user.Meta {
+		eff.Meta[k] = v
+	}
+	for _, g := range resolved {
+		for k, v := range g.Meta {
+			if _, exists := eff.Meta[k]; !exists {
+				eff.Meta[k] = v
+			}
+		}
+	}
+
+	eff.Prefix = m.engine.GetPrefix(user, m.groups, contexts)
+	eff.Suffix = m.engine.GetSuffix(user, m.groups, contexts)
+
+	return eff, found
+}
+
+// EvaluateUser evaluates a single permission with the authoritative engine.
+// Unknown users are evaluated against defaultGroup without being persisted.
+func (m *Manager) EvaluateUser(id uuid.UUID, permission string, contexts map[string]string, defaultGroup string) (model.Tristate, string) {
+	if defaultGroup == "" {
+		defaultGroup = "default"
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	user, found := m.users[id]
+	if !found {
+		user = model.NewUser(id, "")
+		user.PrimaryGroup = defaultGroup
+	}
+
+	res := m.engine.Evaluate(user, m.groups, permission, contexts)
+	return res.Result, res.Source
+}
+
+// GroupsSnapshot returns deep copies of all groups ordered by descending
+// weight, with name as a stable tie-breaker.
+func (m *Manager) GroupsSnapshot() []*model.Group {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	res := make([]*model.Group, 0, len(m.groups))
+	for _, g := range m.groups {
+		res = append(res, copyGroup(g))
+	}
+	sort.SliceStable(res, func(i, j int) bool {
+		if res[i].Weight != res[j].Weight {
+			return res[i].Weight > res[j].Weight
+		}
+		return res[i].Name < res[j].Name
+	})
+	return res
+}
+
+// GroupSnapshot returns a deep copy of one group.
+func (m *Manager) GroupSnapshot(name string) (*model.Group, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	g, ok := m.groups[strings.ToLower(strings.TrimSpace(name))]
+	if !ok || g == nil {
+		return nil, false
+	}
+	return copyGroup(g), true
+}
+
+func copyNode(n model.Node) model.Node {
+	if n.Contexts != nil {
+		ctxs := make(map[string]string, len(n.Contexts))
+		for k, v := range n.Contexts {
+			ctxs[k] = v
+		}
+		n.Contexts = ctxs
+	}
+	return n
+}
+
+func copyGroup(g *model.Group) *model.Group {
+	cp := model.NewGroup(g.Name, g.Weight)
+	cp.DisplayName = g.DisplayName
+	for _, n := range g.Nodes {
+		cp.Nodes = append(cp.Nodes, copyNode(n))
+	}
+	for _, p := range g.Parents {
+		cp.Parents = append(cp.Parents, copyInheritance(p))
+	}
+	for k, v := range g.Meta {
+		cp.Meta[k] = v
+	}
+	for _, p := range g.Prefixes {
+		cp.Prefixes = append(cp.Prefixes, copyPriorityMeta(p))
+	}
+	for _, s := range g.Suffixes {
+		cp.Suffixes = append(cp.Suffixes, copyPriorityMeta(s))
+	}
+	return cp
+}
+
+func copyInheritance(i model.Inheritance) model.Inheritance {
+	if i.Contexts != nil {
+		ctxs := make(map[string]string, len(i.Contexts))
+		for k, v := range i.Contexts {
+			ctxs[k] = v
+		}
+		i.Contexts = ctxs
+	}
+	return i
+}
+
+func copyPriorityMeta(p model.PriorityMeta) model.PriorityMeta {
+	if p.Contexts != nil {
+		ctxs := make(map[string]string, len(p.Contexts))
+		for k, v := range p.Contexts {
+			ctxs[k] = v
+		}
+		p.Contexts = ctxs
+	}
+	return p
 }
 
 // -----------------------------------------------------------------------------
