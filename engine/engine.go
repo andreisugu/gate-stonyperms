@@ -438,72 +438,72 @@ func (e *Engine) ResolveGroupHierarchy(root *model.Group, groups map[string]*mod
 	return result
 }
 
-// GetPrefix resolves the highest priority active prefix for a user.
+// GetPrefix resolves the highest priority active prefix for a user,
+// giving precedence to direct user prefixes, then the user's explicit non-default
+// primary group, and finally inherited groups.
 func (e *Engine) GetPrefix(user *model.User, groups map[string]*model.Group, contexts map[string]string) string {
-	now := time.Now()
-	var highest *model.PriorityMeta
-
-	// Check direct user prefixes
-	for _, p := range user.Prefixes {
-		if p.IsExpired(now) || !p.MatchesContext(contexts) {
-			continue
-		}
-		if highest == nil || p.Priority > highest.Priority {
-			curr := p
-			highest = &curr
-		}
+	if user == nil {
+		return ""
 	}
-
-	// Check group prefixes
-	resolved := e.ResolveInheritedGroups(user, groups, contexts, now)
-	for _, g := range resolved {
-		for _, p := range g.Prefixes {
-			if p.IsExpired(now) || !p.MatchesContext(contexts) {
-				continue
-			}
-			if highest == nil || p.Priority > highest.Priority {
-				curr := p
-				highest = &curr
-			}
-		}
-	}
-
-	if highest != nil {
-		return highest.Value
-	}
-	return ""
+	return e.resolveAffix(user, groups, contexts, user.Prefixes, func(g *model.Group) []model.PriorityMeta {
+		return g.Prefixes
+	})
 }
 
-// GetSuffix resolves the highest priority active suffix for a user.
+// GetSuffix resolves the highest priority active suffix for a user,
+// giving precedence to direct user suffixes, then the user's explicit non-default
+// primary group, and finally inherited groups.
 func (e *Engine) GetSuffix(user *model.User, groups map[string]*model.Group, contexts map[string]string) string {
-	now := time.Now()
-	var highest *model.PriorityMeta
+	if user == nil {
+		return ""
+	}
+	return e.resolveAffix(user, groups, contexts, user.Suffixes, func(g *model.Group) []model.PriorityMeta {
+		return g.Suffixes
+	})
+}
 
-	// Check direct user suffixes
-	for _, s := range user.Suffixes {
-		if s.IsExpired(now) || !s.MatchesContext(contexts) {
+func highestActiveAffix(items []model.PriorityMeta, contexts map[string]string, now time.Time) *model.PriorityMeta {
+	var highest *model.PriorityMeta
+	for _, item := range items {
+		if item.IsExpired(now) || !item.MatchesContext(contexts) {
 			continue
 		}
-		if highest == nil || s.Priority > highest.Priority {
-			curr := s
+		if highest == nil || item.Priority > highest.Priority {
+			curr := item
 			highest = &curr
 		}
 	}
+	return highest
+}
 
-	// Check group suffixes
-	resolved := e.ResolveInheritedGroups(user, groups, contexts, now)
-	for _, g := range resolved {
-		for _, s := range g.Suffixes {
-			if s.IsExpired(now) || !s.MatchesContext(contexts) {
-				continue
-			}
-			if highest == nil || s.Priority > highest.Priority {
-				curr := s
-				highest = &curr
+func (e *Engine) resolveAffix(
+	user *model.User,
+	groups map[string]*model.Group,
+	contexts map[string]string,
+	direct []model.PriorityMeta,
+	groupAffixes func(*model.Group) []model.PriorityMeta,
+) string {
+	now := time.Now()
+	if best := highestActiveAffix(direct, contexts, now); best != nil {
+		return best.Value
+	}
+
+	primary := strings.ToLower(strings.TrimSpace(user.PrimaryGroup))
+	if primary != "" && primary != "default" {
+		if pg, ok := groups[primary]; ok && pg != nil {
+			if best := highestActiveAffix(groupAffixes(pg), contexts, now); best != nil {
+				return best.Value
 			}
 		}
 	}
 
+	var highest *model.PriorityMeta
+	for _, g := range e.ResolveInheritedGroups(user, groups, contexts, now) {
+		candidate := highestActiveAffix(groupAffixes(g), contexts, now)
+		if candidate != nil && (highest == nil || candidate.Priority > highest.Priority) {
+			highest = candidate
+		}
+	}
 	if highest != nil {
 		return highest.Value
 	}
