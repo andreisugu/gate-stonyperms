@@ -104,16 +104,12 @@ func HandleTrackDispatch(mgr *manager.Manager, src command.Source, args []string
 		if len(rest) < 1 {
 			return src.SendMessage(Msg(Prefix + "&cUsage: /sp track <track> rename <newName>&r"))
 		}
-		newName := strings.ToLower(rest[0])
-		if mgr.GetTrack(newName) != nil {
-			return src.SendMessage(Msg(Prefix+"&cTrack '&e%s&c' already exists.&r", newName))
+		newName := strings.ToLower(strings.TrimSpace(rest[0]))
+		renamed, _, err := mgr.RenameTrack(track.Name, newName, getActorName(src))
+		if err != nil {
+			return src.SendMessage(Msg(Prefix+"&cFailed to rename track: %v&r", err))
 		}
-		oldName := track.Name
-		_ = mgr.DeleteTrack(oldName)
-		track.Name = newName
-		_ = mgr.SaveTrack(track)
-		mgr.LogAction(getActorName(src), "track", newName, fmt.Sprintf("Renamed track from '%s' to '%s'", oldName, newName))
-		return src.SendMessage(Msg(Prefix+"&aRenamed track &b%s&a to &b%s&a!&r", oldName, newName))
+		return src.SendMessage(Msg(Prefix+"&aRenamed track &b%s&a to &b%s&a!&r", track.Name, renamed.Name))
 
 	case "clone":
 		if len(rest) < 1 {
@@ -133,6 +129,8 @@ func HandleTrackDispatch(mgr *manager.Manager, src command.Source, args []string
 		return openEditorSession(mgr, src, manager.WebSessionCreateOptions{
 			Actor:        getActorName(src),
 			CommandAlias: "sp",
+			TargetType:   "track",
+			Target:       track.Name,
 		})
 
 	default:

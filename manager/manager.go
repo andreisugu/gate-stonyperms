@@ -28,23 +28,25 @@ var (
 
 // Manager coordinates in-memory data, persistence, permission evaluation, and promotion tracks.
 type Manager struct {
-	mu             sync.RWMutex
-	storage        storage.StorageProvider
-	engine         *engine.Engine
-	users          map[uuid.UUID]*model.User
-	nameToUUID     map[string]uuid.UUID
-	groups         map[string]*model.Group
-	tracks         map[string]*model.Track
-	logs           []model.LogEntry
-	updateListener atomic.Pointer[func()]
-	subMu          sync.Mutex
-	subscribers    map[uint64]*eventSubscriber
-	nextSubID      uint64
-	subClosed      bool
-	stopChan       chan struct{}
-	revision       atomic.Uint64
-	generation     string
-	exportDir      string
+	mu               sync.RWMutex
+	storage          storage.StorageProvider
+	engine           *engine.Engine
+	users            map[uuid.UUID]*model.User
+	nameToUUID       map[string]uuid.UUID
+	groups           map[string]*model.Group
+	tracks           map[string]*model.Track
+	logs             []model.LogEntry
+	updateListener   atomic.Pointer[func()]
+	subMu            sync.Mutex
+	subscribers      map[uint64]*eventSubscriber
+	nextSubID        uint64
+	subClosed        bool
+	stopChan         chan struct{}
+	revision         atomic.Uint64
+	generation       string
+	exportDir        string
+	defaultGroup     string
+	auditLogDisabled bool
 }
 
 // EffectiveNode is a permission node together with the entity it came from.
@@ -137,17 +139,18 @@ func newGeneration() string {
 // New creates and loads a new StonyPerms Manager.
 func New(store storage.StorageProvider) (*Manager, error) {
 	m := &Manager{
-		storage:     store,
-		engine:      engine.New(),
-		users:       make(map[uuid.UUID]*model.User),
-		nameToUUID:  make(map[string]uuid.UUID),
-		groups:      make(map[string]*model.Group),
-		tracks:      make(map[string]*model.Track),
-		logs:        make([]model.LogEntry, 0),
-		subscribers: make(map[uint64]*eventSubscriber),
-		stopChan:    make(chan struct{}),
-		generation:  newGeneration(),
-		exportDir:   deriveExportDir(store),
+		storage:      store,
+		engine:       engine.New(),
+		users:        make(map[uuid.UUID]*model.User),
+		nameToUUID:   make(map[string]uuid.UUID),
+		groups:       make(map[string]*model.Group),
+		tracks:       make(map[string]*model.Track),
+		logs:         make([]model.LogEntry, 0),
+		subscribers:  make(map[uint64]*eventSubscriber),
+		stopChan:     make(chan struct{}),
+		generation:   newGeneration(),
+		exportDir:    deriveExportDir(store),
+		defaultGroup: "default",
 	}
 	m.revision.Store(1)
 
@@ -174,6 +177,48 @@ func (m *Manager) Close() {
 // Engine returns the underlying calculation engine.
 func (m *Manager) Engine() *engine.Engine {
 	return m.engine
+}
+
+// SetDefaultGroup configures the fallback group name assigned to new or default-resolved users.
+func (m *Manager) SetDefaultGroup(name string) {
+	clean := strings.ToLower(strings.TrimSpace(name))
+	if clean == "" {
+		clean = "default"
+	}
+	m.mu.Lock()
+	m.defaultGroup = clean
+	m.mu.Unlock()
+
+	st := m.getWebState()
+	st.mu.Lock()
+	if st.config.DefaultGroup == "" || st.config.DefaultGroup == "default" {
+		st.config.DefaultGroup = clean
+	}
+	st.mu.Unlock()
+}
+
+// DefaultGroup returns the configured fallback group name (defaults to "default").
+func (m *Manager) DefaultGroup() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.defaultGroup == "" {
+		return "default"
+	}
+	return m.defaultGroup
+}
+
+// SetAuditLogEnabled enables or disables recording administrative audit log entries.
+func (m *Manager) SetAuditLogEnabled(enabled bool) {
+	m.mu.Lock()
+	m.auditLogDisabled = !enabled
+	m.mu.Unlock()
+}
+
+// IsAuditLogEnabled reports whether audit logging is currently enabled.
+func (m *Manager) IsAuditLogEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return !m.auditLogDisabled
 }
 
 // Reload reloads all data from the storage provider into memory.
@@ -387,7 +432,12 @@ func (m *Manager) GetOrCreateUser(id uuid.UUID, username string) *model.User {
 		return u
 	}
 
+	defGroup := m.defaultGroup
+	if defGroup == "" {
+		defGroup = "default"
+	}
 	u := model.NewUser(id, username)
+	u.PrimaryGroup = defGroup
 	m.users[id] = u
 	if username != "" {
 		m.nameToUUID[strings.ToLower(username)] = id
@@ -486,7 +536,7 @@ func (m *Manager) GetGroupCopy(name string) *model.Group {
 	return copyGroup(g)
 }
 
-// GetGroups returns all groups.
+// GetGroups returns all groups sorted deterministically by Weight descending then Name ascending.
 func (m *Manager) GetGroups() []*model.Group {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -495,6 +545,12 @@ func (m *Manager) GetGroups() []*model.Group {
 	for _, g := range m.groups {
 		res = append(res, g)
 	}
+	sort.SliceStable(res, func(i, j int) bool {
+		if res[i].Weight != res[j].Weight {
+			return res[i].Weight > res[j].Weight
+		}
+		return res[i].Name < res[j].Name
+	})
 	return res
 }
 
@@ -564,6 +620,10 @@ func (m *Manager) DeleteGroup(name string) error {
 	}
 
 	m.mu.Lock()
+	if m.defaultGroup != "" && name == m.defaultGroup {
+		m.mu.Unlock()
+		return fmt.Errorf("cannot delete the default group")
+	}
 	var rev uint64
 	deleted := false
 	if _, ok := m.groups[name]; ok {
@@ -587,25 +647,37 @@ func (m *Manager) DeleteGroup(name string) error {
 	return err
 }
 
-// GetGroupMembers returns all users that have this group as primary group or direct parent.
+// GetGroupMembers returns active (non-expired) users that have this group as primary group or direct parent.
 func (m *Manager) GetGroupMembers(groupName string) []*model.User {
 	groupName = strings.ToLower(strings.TrimSpace(groupName))
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	now := time.Now()
 	var members []*model.User
 	for _, u := range m.users {
+		if u == nil {
+			continue
+		}
 		if strings.EqualFold(u.PrimaryGroup, groupName) {
 			members = append(members, u)
 			continue
 		}
 		for _, p := range u.Parents {
-			if strings.EqualFold(p.Group, groupName) {
+			if strings.EqualFold(p.Group, groupName) && !p.IsExpired(now) {
 				members = append(members, u)
 				break
 			}
 		}
 	}
+	sort.SliceStable(members, func(i, j int) bool {
+		li := strings.ToLower(members[i].Username)
+		lj := strings.ToLower(members[j].Username)
+		if li != lj {
+			return li < lj
+		}
+		return members[i].UUID.String() < members[j].UUID.String()
+	})
 	return members
 }
 
@@ -699,7 +771,7 @@ func (m *Manager) GetTrackCopy(name string) *model.Track {
 	return copyTrack(t)
 }
 
-// GetTracks returns all tracks.
+// GetTracks returns all tracks sorted deterministically by Name ascending.
 func (m *Manager) GetTracks() []*model.Track {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -708,6 +780,9 @@ func (m *Manager) GetTracks() []*model.Track {
 	for _, t := range m.tracks {
 		res = append(res, t)
 	}
+	sort.SliceStable(res, func(i, j int) bool {
+		return res[i].Name < res[j].Name
+	})
 	return res
 }
 
@@ -1022,13 +1097,14 @@ func (m *Manager) matchesEffectiveGroup(userID uuid.UUID, target string, ctxs ma
 	if target == "" {
 		return permission.Undefined
 	}
-	eff, ok, _ := m.EffectiveUser(userID, ctxs, "default")
+	defGroup := m.DefaultGroup()
+	eff, ok, _ := m.EffectiveUser(userID, ctxs, defGroup)
 	if !ok || eff == nil {
 		return permission.Undefined
 	}
 	primary := strings.ToLower(strings.TrimSpace(eff.PrimaryGroup))
 	if primary == "" {
-		primary = "default"
+		primary = defGroup
 	}
 	if primary == target {
 		return permission.True
@@ -1352,6 +1428,9 @@ func (m *Manager) LogAction(actor, targetType, target, action string) {
 }
 
 func (m *Manager) logActionLocked(actor, targetType, target, action string) {
+	if m.auditLogDisabled {
+		return
+	}
 	entry := model.NewLogEntry(actor, targetType, target, action)
 	m.logs = append(m.logs, entry)
 	if len(m.logs) > 1000 {

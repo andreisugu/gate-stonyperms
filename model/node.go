@@ -4,8 +4,88 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
+
+const maxCompiledRegexCache = 1024
+
+var (
+	compiledRegexCache sync.Map
+	compiledRegexCount atomic.Int64
+)
+
+func compileNodeRegex(pat string) (*regexp.Regexp, bool) {
+	if cached, ok := compiledRegexCache.Load(pat); ok {
+		re, valid := cached.(*regexp.Regexp)
+		return re, valid && re != nil
+	}
+	re, err := regexp.Compile("(?i)^(?:" + pat + ")$")
+	if err != nil {
+		return nil, false
+	}
+	if compiledRegexCount.Add(1) <= maxCompiledRegexCache {
+		compiledRegexCache.Store(pat, re)
+	}
+	return re, true
+}
+
+// CloneContextMap returns a shallow copy of src, or nil when src is empty.
+func CloneContextMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	cp := make(map[string]string, len(src))
+	for k, v := range src {
+		cp[k] = v
+	}
+	return cp
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	cp := make(map[string]string, len(src))
+	for k, v := range src {
+		cp[k] = v
+	}
+	return cp
+}
+
+func cloneNodes(src []Node) []Node {
+	if len(src) == 0 {
+		return make([]Node, 0)
+	}
+	out := make([]Node, len(src))
+	for i, n := range src {
+		n.Contexts = CloneContextMap(n.Contexts)
+		out[i] = n
+	}
+	return out
+}
+
+func cloneInheritances(src []Inheritance) []Inheritance {
+	if len(src) == 0 {
+		return make([]Inheritance, 0)
+	}
+	out := make([]Inheritance, len(src))
+	for i, inh := range src {
+		inh.Contexts = CloneContextMap(inh.Contexts)
+		out[i] = inh
+	}
+	return out
+}
+
+func clonePriorityMetas(src []PriorityMeta) []PriorityMeta {
+	if len(src) == 0 {
+		return make([]PriorityMeta, 0)
+	}
+	out := make([]PriorityMeta, len(src))
+	for i, pm := range src {
+		pm.Contexts = CloneContextMap(pm.Contexts)
+		out[i] = pm
+	}
+	return out
+}
 
 // Tristate represents the three states of a permission check: Undefined, False, or True.
 type Tristate int
@@ -236,8 +316,8 @@ func EvaluateNodeMatch(nodeKey, targetPerm string) (bool, bool, int) {
 		if pat == "" {
 			return false, false, 0
 		}
-		re, err := regexp.Compile("(?i)^(?:" + pat + ")$")
-		if err != nil || !re.MatchString(t) {
+		re, ok := compileNodeRegex(pat)
+		if !ok || !re.MatchString(t) {
 			return false, false, 0
 		}
 		return true, false, len(pat)

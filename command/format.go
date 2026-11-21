@@ -2,6 +2,7 @@ package command
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -278,9 +279,14 @@ func FormatContexts(contexts map[string]string) string {
 	if len(contexts) == 0 {
 		return ""
 	}
-	var pairs []string
-	for k, v := range contexts {
-		pairs = append(pairs, fmt.Sprintf("%s=%s", k, v))
+	keys := make([]string, 0, len(contexts))
+	for k := range contexts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
+	for _, k := range keys {
+		pairs = append(pairs, fmt.Sprintf("%s=%s", k, contexts[k]))
 	}
 	return "&8[" + strings.Join(pairs, ", ") + "]&r"
 }

@@ -70,19 +70,12 @@ func HandleGroupDispatch(mgr *manager.Manager, src command.Source, args []string
 		if len(rest) < 1 {
 			return src.SendMessage(Msg(Prefix + "&cUsage: /sp group <group> rename <newName>&r"))
 		}
-		newName := strings.ToLower(rest[0])
-		if group.Name == "default" {
-			return src.SendMessage(Msg(Prefix + "&cCannot rename the default group.&r"))
+		newName := strings.ToLower(strings.TrimSpace(rest[0]))
+		renamed, _, err := mgr.RenameGroup(group.Name, newName, getActorName(src))
+		if err != nil {
+			return src.SendMessage(Msg(Prefix+"&cFailed to rename group: %v&r", err))
 		}
-		if mgr.GetGroup(newName) != nil {
-			return src.SendMessage(Msg(Prefix+"&cGroup '&e%s&c' already exists.&r", newName))
-		}
-		oldName := group.Name
-		_ = mgr.DeleteGroup(oldName)
-		group.Name = newName
-		_ = mgr.SaveGroup(group)
-		mgr.LogAction(getActorName(src), "group", newName, fmt.Sprintf("Renamed group from '%s' to '%s'", oldName, newName))
-		return src.SendMessage(Msg(Prefix+"&aRenamed group &e%s&a to &e%s&a!&r", oldName, newName))
+		return src.SendMessage(Msg(Prefix+"&aRenamed group &e%s&a to &e%s&a!&r", group.Name, renamed.Name))
 
 	case "clone":
 		if len(rest) < 1 {

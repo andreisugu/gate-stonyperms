@@ -114,7 +114,7 @@ Read the complete contract, endpoints, security rules, and token generation step
 
 ## ⚙️ Configuration
 
-Generated at `config/stonyperms.toml`:
+Generated at `config/stonyperms.toml` (override path with `STONYPERMS_CONFIG`):
 
 ```toml
 default_group = "default"
@@ -245,7 +245,7 @@ stack_deduplicate = true
 /sp group <group> info
 /sp group <group> setweight <weight>
 /sp group <group> setdisplayname <displayName>
-/sp group <group> rename <newName>
+/sp group <group> rename <newName>   # cascades across users, child groups & tracks
 /sp group <group> clone <newName>
 /sp group <group> listmembers
 /sp group <group> showtracks
@@ -258,7 +258,7 @@ stack_deduplicate = true
 
 #### Tracks & Audit Log
 ```text
-/sp track <track> <info|append|insert|remove|rename|clear> ...
+/sp track <track> <info|append|insert|remove|rename|clone|editor|clear> ...
 /sp log <recent|search|userhistory|grouphistory|trackhistory> ...
 ```
 

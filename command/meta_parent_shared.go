@@ -3,6 +3,7 @@ package command
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -730,10 +731,15 @@ func handleSubjectMeta(mgr *manager.Manager, src command.Source, subj permSubjec
 			}
 			customLines = append(customLines, fmt.Sprintf("  &6• &e%s&7: &f%s&r%s %s", me.Key, me.Value, exp, FormatContexts(me.Contexts)))
 		}
-		for k, v := range metaMap {
+		extraKeys := make([]string, 0, len(metaMap))
+		for k := range metaMap {
 			if !coveredGlobal[strings.ToLower(k)] {
-				customLines = append(customLines, fmt.Sprintf("  &6• &e%s&7: &f%s&r", k, v))
+				extraKeys = append(extraKeys, k)
 			}
+		}
+		sort.Strings(extraKeys)
+		for _, k := range extraKeys {
+			customLines = append(customLines, fmt.Sprintf("  &6• &e%s&7: &f%s&r", k, metaMap[k]))
 		}
 		lines = append(lines, SubHeader(fmt.Sprintf("Custom Keys (%d)", len(customLines))))
 		if len(customLines) == 0 {

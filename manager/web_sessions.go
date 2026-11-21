@@ -101,7 +101,7 @@ type applyCodeEntry struct {
 type WebSessionCreateOptions struct {
 	Actor            string
 	CommandAlias     string
-	TargetType       string // "all", "user", "group"
+	TargetType       string // "all", "user", "group", "track"
 	Target           string
 	Filter           string
 	ExtraPermissions []string
@@ -378,6 +378,14 @@ func (m *Manager) CreateEditorSession(opts WebSessionCreateOptions) (*EditorSess
 	}
 
 	var webURL string
+	targetQuery := ""
+	if targetType == "group" && session.Metadata.Target != "" {
+		targetQuery = "group:" + strings.ToLower(session.Metadata.Target)
+	} else if targetType == "user" && session.Metadata.Target != "" {
+		targetQuery = "user:" + session.Metadata.Target
+	} else if targetType == "track" && session.Metadata.Target != "" {
+		targetQuery = "track:" + strings.ToLower(session.Metadata.Target)
+	}
 	if cfg.LiveSave {
 		st.mu.Lock()
 		pruneSessionMapLocked(st.editorSessions, now, func(v *editorSessionEntry) (time.Time, time.Time) { return v.createdAt, v.expiresAt })
@@ -389,10 +397,8 @@ func (m *Manager) CreateEditorSession(opts WebSessionCreateOptions) (*EditorSess
 		st.mu.Unlock()
 
 		webURL = joinWebPath(cfg.BaseURL, "/editor?session="+token)
-		if targetType == "group" && session.Metadata.Target != "" {
-			webURL += "&target=" + urlEscapeSimple("group:"+strings.ToLower(session.Metadata.Target))
-		} else if targetType == "user" && session.Metadata.Target != "" {
-			webURL += "&target=" + urlEscapeSimple("user:"+session.Metadata.Target)
+		if targetQuery != "" {
+			webURL += "&target=" + urlEscapeSimple(targetQuery)
 		}
 	} else {
 		code, encodeErr := EncodePortableApplyCode(EditorSavePayload{
@@ -405,7 +411,11 @@ func (m *Manager) CreateEditorSession(opts WebSessionCreateOptions) (*EditorSess
 		if encodeErr != nil {
 			return nil, encodeErr
 		}
-		webURL = joinWebPath(cfg.BaseURL, "/editor#data="+code)
+		editorPath := "/editor#data=" + code
+		if targetQuery != "" {
+			editorPath = "/editor?target=" + urlEscapeSimple(targetQuery) + "#data=" + code
+		}
+		webURL = joinWebPath(cfg.BaseURL, editorPath)
 	}
 
 	return &EditorSessionCreated{
@@ -961,13 +971,13 @@ func (m *Manager) CreateTreeSession(root, actor, commandAlias string, extraPerms
 
 	allPerms := collectKnownPermissions(groups, users, mergedExtras)
 	var filtered []string
-	if normalizedRoot == "." {
+	prefixLower := strings.Trim(strings.ToLower(normalizedRoot), ".")
+	if normalizedRoot == "." || prefixLower == "" {
 		filtered = allPerms
 	} else {
-		prefixLower := strings.ToLower(normalizedRoot)
 		for _, p := range allPerms {
 			pl := strings.ToLower(p)
-			if pl == prefixLower || strings.HasPrefix(pl, prefixLower+".") || strings.HasPrefix(pl, prefixLower) {
+			if pl == prefixLower || strings.HasPrefix(pl, prefixLower+".") {
 				filtered = append(filtered, p)
 			}
 		}
@@ -1504,31 +1514,46 @@ func collectPotentialContexts(groups []model.Group, users []model.User, servers 
 		}
 		s[v] = struct{}{}
 	}
+	addContextMap := func(m map[string]string) {
+		for k, v := range m {
+			addCtx(k, v)
+		}
+	}
 	for _, srv := range servers {
 		addCtx("server", srv)
 	}
 	for _, g := range groups {
 		for _, n := range g.Nodes {
-			for k, v := range n.Contexts {
-				addCtx(k, v)
-			}
+			addContextMap(n.Contexts)
 		}
 		for _, p := range g.Parents {
-			for k, v := range p.Contexts {
-				addCtx(k, v)
-			}
+			addContextMap(p.Contexts)
+		}
+		for _, me := range g.MetaEntries {
+			addContextMap(me.Contexts)
+		}
+		for _, px := range g.Prefixes {
+			addContextMap(px.Contexts)
+		}
+		for _, sx := range g.Suffixes {
+			addContextMap(sx.Contexts)
 		}
 	}
 	for _, u := range users {
 		for _, n := range u.Nodes {
-			for k, v := range n.Contexts {
-				addCtx(k, v)
-			}
+			addContextMap(n.Contexts)
 		}
 		for _, p := range u.Parents {
-			for k, v := range p.Contexts {
-				addCtx(k, v)
-			}
+			addContextMap(p.Contexts)
+		}
+		for _, me := range u.MetaEntries {
+			addContextMap(me.Contexts)
+		}
+		for _, px := range u.Prefixes {
+			addContextMap(px.Contexts)
+		}
+		for _, sx := range u.Suffixes {
+			addContextMap(sx.Contexts)
 		}
 	}
 	for k, vals := range extras {
@@ -1561,17 +1586,21 @@ func defaultKnownPermissions() []string {
 		"stonyperms.*",
 		"stonyperms.admin",
 		"stonyperms.applyedits",
+		"stonyperms.bulkupdate",
 		"stonyperms.check",
 		"stonyperms.creategroup",
 		"stonyperms.createtrack",
 		"stonyperms.deletegroup",
 		"stonyperms.deletetrack",
 		"stonyperms.editor",
+		"stonyperms.export",
 		"stonyperms.group",
+		"stonyperms.import",
 		"stonyperms.info",
 		"stonyperms.listgroups",
 		"stonyperms.listtracks",
 		"stonyperms.log",
+		"stonyperms.search",
 		"stonyperms.sync",
 		"stonyperms.track",
 		"stonyperms.tree",
@@ -1587,6 +1616,8 @@ func defaultKnownPermissions() []string {
 		"bettertab.admin",
 		"bettertab.info",
 		"bettertab.name",
+		"bettertab.nick",
+		"bettertab.whois",
 		"bettertab.name.color",
 		"bettertab.reload",
 		"bettertab.reset",

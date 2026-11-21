@@ -348,3 +348,29 @@ func TestContextSpecificityShorthandRegexAndPrimaryGroupCalc(t *testing.T) {
 		t.Fatalf("all-parents-by-weight survival primary = %q, want mod", pg)
 	}
 }
+
+func TestAffixContextSpecificityTieBreaking(t *testing.T) {
+	eng := New()
+	g := model.NewGroup("vip", 10)
+	// Insert global affix before contextual affix at equal priority 100.
+	g.AddPrefix(model.PriorityMeta{Priority: 100, Value: "[Global] "})
+	g.AddPrefix(model.PriorityMeta{Priority: 100, Value: "[Lobby] ", Contexts: map[string]string{"server": "lobby"}})
+	g.AddSuffix(model.PriorityMeta{Priority: 50, Value: " [G]"})
+	g.AddSuffix(model.PriorityMeta{Priority: 50, Value: " [L]", Contexts: map[string]string{"server": "lobby"}})
+
+	groups := map[string]*model.Group{"vip": g}
+	u := model.NewUser(uuid.New(), "AffixTieUser")
+	u.PrimaryGroup = "vip"
+
+	if got := eng.GetPrefix(u, groups, map[string]string{"server": "lobby"}); got != "[Lobby] " {
+		t.Fatalf("expected contextual prefix [Lobby]  to beat global at equal priority, got %q", got)
+	}
+	if got := eng.GetSuffix(u, groups, map[string]string{"server": "lobby"}); got != " [L]" {
+		t.Fatalf("expected contextual suffix ' [L]' to beat global at equal priority, got %q", got)
+	}
+
+	eng.SetStackConfig(StackConfig{PrefixEnabled: true, SuffixEnabled: true, Deduplicate: true})
+	if got := eng.GetPrefix(u, groups, map[string]string{"server": "lobby"}); got != "[Lobby] [Global] " {
+		t.Fatalf("stacked prefix order = %q, want '[Lobby] [Global] '", got)
+	}
+}

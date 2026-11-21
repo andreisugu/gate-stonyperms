@@ -557,6 +557,7 @@ func (e *Engine) formatStackedAffix(
 	now := time.Now()
 	type rankedAffix struct {
 		priority int
+		ctxCount int
 		order    int
 		value    string
 	}
@@ -564,14 +565,14 @@ func (e *Engine) formatStackedAffix(
 	order := 0
 	for _, item := range direct {
 		if !item.IsExpired(now) && item.MatchesContext(contexts) && item.Value != "" {
-			all = append(all, rankedAffix{priority: item.Priority, order: order, value: item.Value})
+			all = append(all, rankedAffix{priority: item.Priority, ctxCount: len(item.Contexts), order: order, value: item.Value})
 			order++
 		}
 	}
 	for _, g := range e.ResolveInheritedGroups(user, groups, contexts, now) {
 		for _, item := range groupAffixes(g) {
 			if !item.IsExpired(now) && item.MatchesContext(contexts) && item.Value != "" {
-				all = append(all, rankedAffix{priority: item.Priority, order: order, value: item.Value})
+				all = append(all, rankedAffix{priority: item.Priority, ctxCount: len(item.Contexts), order: order, value: item.Value})
 				order++
 			}
 		}
@@ -582,6 +583,9 @@ func (e *Engine) formatStackedAffix(
 	sort.SliceStable(all, func(i, j int) bool {
 		if all[i].priority != all[j].priority {
 			return all[i].priority > all[j].priority
+		}
+		if all[i].ctxCount != all[j].ctxCount {
+			return all[i].ctxCount > all[j].ctxCount
 		}
 		return all[i].order < all[j].order
 	})
@@ -609,7 +613,8 @@ func highestActiveAffix(items []model.PriorityMeta, contexts map[string]string, 
 		if item.IsExpired(now) || !item.MatchesContext(contexts) {
 			continue
 		}
-		if highest == nil || item.Priority > highest.Priority {
+		if highest == nil || item.Priority > highest.Priority ||
+			(item.Priority == highest.Priority && len(item.Contexts) > len(highest.Contexts)) {
 			curr := item
 			highest = &curr
 		}

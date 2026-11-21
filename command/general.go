@@ -124,6 +124,8 @@ func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
 			ClickableCmd("&b/sp track <track> insert <group> <pos>&r", "/sp track ", "Insert a group at position (1-based)"),
 			ClickableCmd("&b/sp track <track> remove <group>&r", "/sp track ", "Remove a group from track"),
 			ClickableCmd("&b/sp track <track> rename <newName>&r", "/sp track ", "Rename the track"),
+			ClickableCmd("&b/sp track <track> clone <newName>&r", "/sp track ", "Clone track to a new track"),
+			ClickableCmd("&b/sp track <track> editor&r", "/sp track ", "Open track in the web editor"),
 			ClickableCmd("&b/sp track <track> clear&r", "/sp track ", "Clear all groups from track"),
 			MsgPlain(Separator()),
 			MsgPlain("&eAudit Log Commands:&r &b/sp log <subcommand>&r"),
@@ -181,11 +183,17 @@ func makeHelpNavFooter(currentPage, totalPages int) c.Component {
 // HandleInfo displays detailed system diagnostic information.
 func HandleInfo(mgr *manager.Manager, src command.Source) error {
 	uCount, gCount, tCount, lCount := mgr.Stats()
+	stackCfg := mgr.Engine().GetStackConfig()
 
 	lines := []string{
 		Header("StonyPerms System Info"),
 		"&bStorage Type:&r &fJSON Flat-File&r",
 		"&bStorage Status:&r &aConnected & Healthy&r",
+		fmt.Sprintf("&bDefault Group:&r &e%s&r", mgr.DefaultGroup()),
+		fmt.Sprintf("&bPrimary Group Calc:&r &e%s&r", mgr.Engine().GetPrimaryGroupCalculation()),
+		fmt.Sprintf("&bPrefix/Suffix Stacking:&r &7prefix=%v, suffix=%v&r", stackCfg.PrefixEnabled, stackCfg.SuffixEnabled),
+		fmt.Sprintf("&bAudit Logging:&r %s&r", FormatBool(mgr.IsAuditLogEnabled())),
+		fmt.Sprintf("&bRevision:&r &e#%d&r", mgr.Revision()),
 		fmt.Sprintf("&bActive Users (Cached):&r &e%d&r", uCount),
 		fmt.Sprintf("&bLoaded Groups:&r &e%d&r", gCount),
 		fmt.Sprintf("&bLoaded Tracks:&r &e%d&r", tCount),

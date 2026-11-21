@@ -239,6 +239,8 @@ func (s *Server) writeAPIError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "track_exists", "track already exists")
 	case errors.Is(err, manager.ErrCannotDeleteDefault):
 		writeError(w, http.StatusBadRequest, "cannot_delete_default", "cannot delete the default group")
+	case errors.Is(err, manager.ErrCannotRenameDefault):
+		writeError(w, http.StatusBadRequest, "cannot_rename_default", err.Error())
 	case errors.Is(err, errParentNotFound):
 		writeError(w, http.StatusNotFound, "parent_not_found", "parent group link does not exist")
 	case errors.Is(err, errNodeNotFound):
@@ -1148,6 +1150,7 @@ func (s *Server) handleUserClear(w http.ResponseWriter, r *http.Request) {
 			return true, "Cleared user parents", nil
 		case "meta":
 			u.Meta = make(map[string]string)
+			u.MetaEntries = make([]model.MetaEntry, 0)
 			u.Prefixes = make([]model.PriorityMeta, 0)
 			u.Suffixes = make([]model.PriorityMeta, 0)
 			return true, "Cleared user metadata", nil
@@ -1172,7 +1175,7 @@ type preparedBatchOp struct {
 	group    string
 	key      string
 	node     model.Node
-	metaVal  string
+	meta     model.MetaEntry
 	affix    model.PriorityMeta
 	priority int
 	contexts map[string]string
@@ -1255,13 +1258,31 @@ func (s *Server) prepareBatchOp(raw batchUserOperation, now time.Time) (prepared
 		if !validateSafeText(strVal, maxMetaValueBytes) {
 			return preparedBatchOp{}, &apiError{http.StatusBadRequest, "invalid_meta_value", "meta value must be at most 1024 bytes without control characters"}
 		}
-		return preparedBatchOp{op: op, key: raw.Key, metaVal: strVal}, nil
+		if err := validateContexts(raw.Contexts); err != nil {
+			return preparedBatchOp{}, &apiError{http.StatusBadRequest, "invalid_context", err.Error()}
+		}
+		exp, apiErr := resolveExpiry(raw.DurationSeconds, raw.Expiry, now)
+		if apiErr != nil {
+			return preparedBatchOp{}, apiErr
+		}
+		return preparedBatchOp{
+			op: op,
+			meta: model.MetaEntry{
+				Key:      raw.Key,
+				Value:    strVal,
+				Expiry:   exp,
+				Contexts: copyContexts(raw.Contexts),
+			},
+		}, nil
 
 	case "meta_unset":
 		if !validateMetaKey(raw.Key) {
 			return preparedBatchOp{}, &apiError{http.StatusBadRequest, "invalid_meta_key", "meta key must match ^[a-zA-Z0-9._:-]{1,64}$"}
 		}
-		return preparedBatchOp{op: op, key: raw.Key}, nil
+		if err := validateContexts(raw.Contexts); err != nil {
+			return preparedBatchOp{}, &apiError{http.StatusBadRequest, "invalid_context", err.Error()}
+		}
+		return preparedBatchOp{op: op, key: raw.Key, contexts: copyContexts(raw.Contexts)}, nil
 
 	case "prefix_set", "suffix_set":
 		if raw.Priority == nil {
@@ -1290,7 +1311,10 @@ func (s *Server) prepareBatchOp(raw batchUserOperation, now time.Time) (prepared
 		if raw.Priority == nil {
 			return preparedBatchOp{}, &apiError{http.StatusBadRequest, "invalid_priority", op + " requires priority"}
 		}
-		return preparedBatchOp{op: op, priority: *raw.Priority}, nil
+		if err := validateContexts(raw.Contexts); err != nil {
+			return preparedBatchOp{}, &apiError{http.StatusBadRequest, "invalid_context", err.Error()}
+		}
+		return preparedBatchOp{op: op, priority: *raw.Priority, contexts: copyContexts(raw.Contexts)}, nil
 
 	default:
 		return preparedBatchOp{}, &apiError{http.StatusBadRequest, "invalid_batch", fmt.Sprintf("unsupported batch op %q", raw.Op)}
@@ -1309,7 +1333,17 @@ func (s *Server) applyPreparedBatchOp(u *model.User, p preparedBatchOp, now time
 		}
 		return removed
 	case "primary_group_set":
-		if strings.EqualFold(u.PrimaryGroup, p.group) {
+		hasGlobalParent := false
+		for _, parent := range u.Parents {
+			if strings.EqualFold(parent.Group, p.group) && len(parent.Contexts) == 0 && !parent.IsExpired(now) {
+				hasGlobalParent = true
+				break
+			}
+		}
+		if !hasGlobalParent {
+			u.AddParent(model.NewInheritance(p.group))
+		}
+		if strings.EqualFold(u.PrimaryGroup, p.group) && hasGlobalParent {
 			return false
 		}
 		u.PrimaryGroup = p.group
@@ -1320,20 +1354,20 @@ func (s *Server) applyPreparedBatchOp(u *model.User, p preparedBatchOp, now time
 	case "permission_unset":
 		return u.RemoveNode(p.key, p.contexts)
 	case "meta_set":
-		u.SetMeta(p.key, p.metaVal)
+		_, _ = u.SetMetaEntry(p.meta, model.TempModifierReplace, now)
 		return true
 	case "meta_unset":
-		return u.UnsetMeta(p.key)
+		return u.UnsetMetaEntry(p.key, p.contexts, false)
 	case "prefix_set":
 		u.AddPrefix(p.affix)
 		return true
 	case "prefix_remove":
-		return u.RemovePrefix(p.priority)
+		return u.RemovePrefixMatch(p.priority, "", p.contexts, false)
 	case "suffix_set":
 		u.AddSuffix(p.affix)
 		return true
 	case "suffix_remove":
-		return u.RemoveSuffix(p.priority)
+		return u.RemoveSuffixMatch(p.priority, "", p.contexts, false)
 	default:
 		return false
 	}

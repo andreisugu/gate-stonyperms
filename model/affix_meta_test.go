@@ -85,3 +85,55 @@ func TestShorthandAndRegexMatching(t *testing.T) {
 		t.Fatal("unexpected regex match for non-digits")
 	}
 }
+
+func TestRegexCacheAndDeepCloneContextIsolation(t *testing.T) {
+	pat := `^essentials\.(fly|back)$`
+	ok, exact, score := EvaluateNodeMatch("r="+pat, "essentials.fly")
+	if !ok || exact || score != len(pat) {
+		t.Fatalf("expected regex match (ok=%v exact=%v score=%d)", ok, exact, score)
+	}
+	if _, cached := compiledRegexCache.Load(pat); !cached {
+		t.Fatal("expected compiled regex to be cached after first evaluation")
+	}
+	if ok2, _, _ := EvaluateNodeMatch("r="+pat, "essentials.home"); ok2 {
+		t.Fatal("did not expect essentials.home to match fly|back regex")
+	}
+
+	g := NewGroup("vip", 20)
+	g.AddParent(Inheritance{Group: "default", Contexts: map[string]string{"server": "lobby"}})
+	g.AddNode(Node{Key: "gate.command.ping", Value: true, Contexts: map[string]string{"server": "lobby"}})
+	g.AddPrefix(PriorityMeta{Priority: 10, Value: "[VIP] ", Contexts: map[string]string{"server": "lobby"}})
+	g.AddSuffix(PriorityMeta{Priority: 10, Value: " [L]", Contexts: map[string]string{"server": "lobby"}})
+
+	gc := g.Clone("vip2")
+	gc.Parents[0].Contexts["server"] = "survival"
+	gc.Nodes[0].Contexts["server"] = "survival"
+	gc.Prefixes[0].Contexts["server"] = "survival"
+	gc.Suffixes[0].Contexts["server"] = "survival"
+
+	if g.Parents[0].Contexts["server"] != "lobby" ||
+		g.Nodes[0].Contexts["server"] != "lobby" ||
+		g.Prefixes[0].Contexts["server"] != "lobby" ||
+		g.Suffixes[0].Contexts["server"] != "lobby" {
+		t.Fatal("Group.Clone mutated context maps on original group")
+	}
+
+	u := NewUser(uuid.New(), "Src")
+	u.AddParent(Inheritance{Group: "vip", Contexts: map[string]string{"server": "hub"}})
+	u.AddNode(Node{Key: "test.perm", Value: true, Contexts: map[string]string{"server": "hub"}})
+	u.AddPrefix(PriorityMeta{Priority: 5, Value: "[A] ", Contexts: map[string]string{"server": "hub"}})
+	u.AddSuffix(PriorityMeta{Priority: 5, Value: " [B]", Contexts: map[string]string{"server": "hub"}})
+
+	uc := u.Clone(uuid.New(), "Dst")
+	uc.Parents[0].Contexts["server"] = "creative"
+	uc.Nodes[0].Contexts["server"] = "creative"
+	uc.Prefixes[0].Contexts["server"] = "creative"
+	uc.Suffixes[0].Contexts["server"] = "creative"
+
+	if u.Parents[0].Contexts["server"] != "hub" ||
+		u.Nodes[0].Contexts["server"] != "hub" ||
+		u.Prefixes[0].Contexts["server"] != "hub" ||
+		u.Suffixes[0].Contexts["server"] != "hub" {
+		t.Fatal("User.Clone mutated context maps on original user")
+	}
+}

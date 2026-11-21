@@ -235,3 +235,82 @@ func TestEditorPreservesContextualAndTempMetaEntries(t *testing.T) {
 		t.Fatalf("expected 2 synchronized MetaEntries on group, got %+v", saved)
 	}
 }
+
+func TestTrackEditorURLAndExtendedPotentialContexts(t *testing.T) {
+	mgr := newWebTestManager(t)
+	_, _ = mgr.CreateGroup("vip", 10, "")
+	tr, _ := mgr.CreateTrack("staff")
+	_ = tr.Append("vip")
+	_ = mgr.SaveTrack(tr)
+
+	u := mgr.GetOrCreateUser(uuid.New(), "CtxTester")
+	uc := mgr.GetUserCopy(u.UUID)
+	_, _ = uc.SetMetaEntry(model.MetaEntry{
+		Key:      "tag",
+		Value:    "star",
+		Contexts: map[string]string{"server": "skyblock"},
+	}, model.TempModifierReplace, time.Now())
+	uc.AddPrefix(model.PriorityMeta{
+		Priority: 10,
+		Value:    "[SB] ",
+		Contexts: map[string]string{"world": "sky_void"},
+	})
+	_ = mgr.SaveUser(uc)
+
+	// Offline portable URL with track target
+	mgr.SetWebConfig(WebConfig{BaseURL: DefaultPublicWebURL, LiveSave: false})
+	offline, err := mgr.CreateEditorSession(WebSessionCreateOptions{
+		Actor:      "Console",
+		TargetType: "track",
+		Target:     "staff",
+	})
+	if err != nil {
+		t.Fatalf("offline track editor session: %v", err)
+	}
+	if !strings.Contains(offline.URL, "/editor?target=track%3Astaff#data=sp1_") {
+		t.Fatalf("unexpected offline track URL: %s", offline.URL)
+	}
+
+	// Live save URL with track target + context discovery from MetaEntries/Prefixes
+	mgr.SetWebConfig(WebConfig{BaseURL: "http://127.0.0.1:8737", LiveSave: true})
+	live, err := mgr.CreateEditorSession(WebSessionCreateOptions{
+		Actor:      "Console",
+		TargetType: "track",
+		Target:     "staff",
+	})
+	if err != nil {
+		t.Fatalf("live track editor session: %v", err)
+	}
+	if !strings.Contains(live.URL, "&target=track%3Astaff") {
+		t.Fatalf("unexpected live track URL: %s", live.URL)
+	}
+	data, ok := mgr.GetEditorSession(live.Token)
+	if !ok {
+		t.Fatal("expected live session stored")
+	}
+	if !containsString(data.PotentialContexts["server"], "skyblock") {
+		t.Fatalf("expected skyblock from MetaEntries in PotentialContexts: %v", data.PotentialContexts["server"])
+	}
+	if !containsString(data.PotentialContexts["world"], "sky_void") {
+		t.Fatalf("expected sky_void from Prefixes in PotentialContexts: %v", data.PotentialContexts["world"])
+	}
+
+	// Strict dotted tree root filtering
+	tree, err := mgr.CreateTreeSession("gate", "Console", "sp", []string{"gate.custom.cmd", "gateway.unrelated"})
+	if err != nil {
+		t.Fatalf("CreateTreeSession: %v", err)
+	}
+	td, _ := mgr.GetTreeSession(tree.Token)
+	if containsString(td.Permissions, "gateway.unrelated") {
+		t.Fatalf("did not expect gateway.unrelated under gate root: %v", td.Permissions)
+	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, it := range items {
+		if it == want {
+			return true
+		}
+	}
+	return false
+}

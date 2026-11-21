@@ -300,3 +300,110 @@ func TestGatePermissionFuncSyntheticGroups(t *testing.T) {
 		t.Fatalf("expected explicit negation group.vip False, got %v", got)
 	}
 }
+
+func TestPolishRenameAuditDefaultAndGroupMembers(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := storage.NewJSONStorage(filepath.Join(tmpDir, "stonyperms"))
+	if err != nil {
+		t.Fatalf("storage: %v", err)
+	}
+	mgr, err := New(store)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	defer mgr.Close()
+
+	_, _ = mgr.CreateGroup("member", 5, "")
+	mgr.SetDefaultGroup("member")
+	if got := mgr.DefaultGroup(); got != "member" {
+		t.Fatalf("DefaultGroup = %q, want member", got)
+	}
+	if _, _, err := mgr.RenameGroup("member", "other", "Console"); err != ErrCannotRenameDefault {
+		t.Fatalf("expected ErrCannotRenameDefault for configured default group, got %v", err)
+	}
+	if err := mgr.DeleteGroup("member"); err == nil {
+		t.Fatal("expected DeleteGroup to reject configured default group")
+	}
+
+	// Disable audit logging temporarily
+	beforeLogs := len(mgr.GetLogs(100))
+	mgr.SetAuditLogEnabled(false)
+	mgr.LogAction("Console", "general", "test", "suppressed entry")
+	if logs := mgr.GetLogs(100); len(logs) != beforeLogs {
+		t.Fatalf("expected audit logs unchanged (%d) when disabled, got %d", beforeLogs, len(logs))
+	}
+	mgr.SetAuditLogEnabled(true)
+
+	// Setup group hierarchy + track + users for RenameGroup cascade & GetGroupMembers filtering
+	_, _ = mgr.CreateGroup("oldvip", 50, "OldVIP")
+	_, _ = mgr.CreateGroup("child", 60, "Child")
+	child := mgr.GetGroupCopy("child")
+	child.AddParent(model.NewInheritance("oldvip"))
+	if err := mgr.SaveGroup(child); err != nil {
+		t.Fatalf("save child: %v", err)
+	}
+	tr, _ := mgr.CreateTrack("donors")
+	_ = tr.Append("member")
+	_ = tr.Append("oldvip")
+	if err := mgr.SaveTrack(tr); err != nil {
+		t.Fatalf("save track: %v", err)
+	}
+
+	uZed := mgr.GetOrCreateUser(uuid.New(), "Zed")
+	if uZed.PrimaryGroup != "member" {
+		t.Fatalf("GetOrCreateUser PrimaryGroup = %q, want member", uZed.PrimaryGroup)
+	}
+	uZedCopy := mgr.GetUserCopy(uZed.UUID)
+	uZedCopy.PrimaryGroup = "oldvip"
+	uZedCopy.AddParent(model.NewInheritance("oldvip"))
+	_ = mgr.SaveUser(uZedCopy)
+
+	uExpired := mgr.GetOrCreateUser(uuid.New(), "Alice")
+	uExpCopy := mgr.GetUserCopy(uExpired.UUID)
+	uExpCopy.Parents = append(uExpCopy.Parents, model.Inheritance{
+		Group:  "oldvip",
+		Expiry: time.Now().Add(-10 * time.Minute).Unix(),
+	})
+	_ = mgr.SaveUser(uExpCopy)
+
+	members := mgr.GetGroupMembers("oldvip")
+	if len(members) != 1 || members[0].Username != "Zed" {
+		t.Fatalf("expected only active member Zed, got %+v", members)
+	}
+
+	if _, _, err := mgr.RenameGroup("oldvip", "newvip", "Console"); err != nil {
+		t.Fatalf("RenameGroup: %v", err)
+	}
+	if mgr.GetGroup("oldvip") != nil || mgr.GetGroup("newvip") == nil {
+		t.Fatal("expected oldvip removed and newvip present")
+	}
+	if got := mgr.GetGroup("child"); got == nil || len(got.Parents) == 0 || got.Parents[0].Group != "newvip" {
+		t.Fatalf("expected child group parent cascaded to newvip, got %+v", got)
+	}
+	if got := mgr.GetTrack("donors"); got == nil || got.Groups[1] != "newvip" {
+		t.Fatalf("expected track donors cascaded to newvip, got %+v", got)
+	}
+	if got := mgr.GetUser(uZed.UUID); got.PrimaryGroup != "newvip" || got.Parents[0].Group != "newvip" {
+		t.Fatalf("expected user PrimaryGroup and Parents cascaded to newvip, got %+v", got)
+	}
+
+	if _, _, err := mgr.RenameTrack("donors", "supporters", "Console"); err != nil {
+		t.Fatalf("RenameTrack: %v", err)
+	}
+	if mgr.GetTrack("donors") != nil || mgr.GetTrack("supporters") == nil {
+		t.Fatal("expected track donors renamed to supporters")
+	}
+	if logs := mgr.GetLogs(10); len(logs) == 0 {
+		t.Fatal("expected audit logs when re-enabled")
+	}
+
+	// Reload from disk to verify persistence of cascaded rename
+	reloaded, err := New(store)
+	if err != nil {
+		t.Fatalf("reload manager: %v", err)
+	}
+	defer reloaded.Close()
+	if reloaded.GetGroup("newvip") == nil || reloaded.GetTrack("supporters") == nil || reloaded.GetUser(uZed.UUID).PrimaryGroup != "newvip" {
+		t.Fatal("expected renamed group/track and cascaded user preserved on disk reload")
+	}
+}

@@ -266,3 +266,51 @@ func TestTrackCloneAndEditor(t *testing.T) {
 		t.Fatalf("track editor: %v", err)
 	}
 }
+
+func TestDeterministicFormatContextsInfoAndCascadingRename(t *testing.T) {
+	mgr, cleanup := setupTestManager(t)
+	defer cleanup()
+
+	formatted := FormatContexts(map[string]string{"world": "nether", "server": "lobby", "arena": "duels"})
+	if formatted != "&8[arena=duels, server=lobby, world=nether]&r" {
+		t.Fatalf("FormatContexts = %q", formatted)
+	}
+
+	_, _ = mgr.CreateGroup("donor", 20, "")
+	tr, _ := mgr.CreateTrack("donors")
+	_ = tr.Append("default")
+	_ = tr.Append("donor")
+	_ = mgr.SaveTrack(tr)
+
+	id := uuid.New()
+	_ = mgr.GetOrCreateUser(id, "RenUser")
+	u := mgr.GetUserCopy(id)
+	u.PrimaryGroup = "donor"
+	u.AddParent(model.NewInheritance("donor"))
+	_ = mgr.SaveUser(u)
+
+	src := &dummySource{}
+	if err := Dispatch(mgr, src, []string{"group", "donor", "rename", "patron"}); err != nil {
+		t.Fatalf("group rename: %v", err)
+	}
+	if mgr.GetUser(id).PrimaryGroup != "patron" {
+		t.Fatalf("expected CLI group rename to cascade to user, got %q", mgr.GetUser(id).PrimaryGroup)
+	}
+	if err := Dispatch(mgr, src, []string{"track", "donors", "rename", "supporters"}); err != nil {
+		t.Fatalf("track rename: %v", err)
+	}
+	if mgr.GetTrack("supporters") == nil {
+		t.Fatal("expected track donors renamed to supporters")
+	}
+
+	src.messages = nil
+	if err := Dispatch(mgr, src, []string{"info"}); err != nil {
+		t.Fatalf("info: %v", err)
+	}
+	infoOut := strings.Join(src.messages, "\n")
+	for _, expected := range []string{"Default Group:", "Primary Group Calc:", "Prefix/Suffix Stacking:", "Audit Logging:", "Revision:"} {
+		if !strings.Contains(infoOut, expected) {
+			t.Fatalf("expected %q in /sp info output, got:\n%s", expected, infoOut)
+		}
+	}
+}

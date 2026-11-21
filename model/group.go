@@ -174,14 +174,12 @@ func (g *Group) CleanExpired(now time.Time) int {
 func (g *Group) Clone(newName string) *Group {
 	cloned := NewGroup(newName, g.Weight)
 	cloned.DisplayName = g.DisplayName
-	cloned.Parents = append(cloned.Parents, g.Parents...)
-	cloned.Nodes = append(cloned.Nodes, g.Nodes...)
-	for k, v := range g.Meta {
-		cloned.Meta[k] = v
-	}
+	cloned.Parents = cloneInheritances(g.Parents)
+	cloned.Nodes = cloneNodes(g.Nodes)
+	cloned.Meta = cloneStringMap(g.Meta)
 	cloned.MetaEntries = cloneMetaEntries(g.MetaEntries)
-	cloned.Prefixes = append(cloned.Prefixes, g.Prefixes...)
-	cloned.Suffixes = append(cloned.Suffixes, g.Suffixes...)
+	cloned.Prefixes = clonePriorityMetas(g.Prefixes)
+	cloned.Suffixes = clonePriorityMetas(g.Suffixes)
 	return cloned
 }
 
