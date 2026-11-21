@@ -1,8 +1,11 @@
 package stonyperms
 
 import (
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -75,6 +78,12 @@ api_snapshot_ttl_seconds = 30
 # Server-Sent Events (/v1/events) for instant permission invalidation.
 # api_sse_enabled = true
 # api_sse_max_clients = 32
+
+# Public origin used in /sp editor, /sp verbose paste, and /sp tree links.
+# Leave empty to derive it from api_listen. Set this when players reach Gate
+# through a different hostname, a reverse proxy, or HTTPS termination.
+# Example: api_editor_public_url = "https://perms.example.com"
+api_editor_public_url = ""
 `
 
 // Config represents the top-level StonyPerms configuration.
@@ -143,6 +152,26 @@ func LoadConfig(filePath string) (*Config, error) {
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
+	editorURL, err := normalizeEditorPublicURL(cfg.APIEditorPublicURL)
+	if err != nil {
+		return nil, err
+	}
+	cfg.APIEditorPublicURL = editorURL
 
 	return cfg, nil
+}
+
+func normalizeEditorPublicURL(raw string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(trimmed)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", fmt.Errorf("api_editor_public_url must be an absolute http(s) URL")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", fmt.Errorf("api_editor_public_url must not contain a query or fragment")
+	}
+	return strings.TrimRight(trimmed, "/"), nil
 }

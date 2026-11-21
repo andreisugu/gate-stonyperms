@@ -100,6 +100,8 @@ api_enabled = true
 api_listen = "127.0.0.1:8737"
 api_token_file = "config/stonyperms-api.token"
 api_sse_enabled = true
+# Public link origin for /sp editor when players use a hostname/reverse proxy
+# api_editor_public_url = "https://perms.example.com"
 
 # Opt-in write tier (keep false unless trusted store/bridge writers need remote mutations)
 api_write_enabled = false
@@ -129,6 +131,7 @@ api_allow_remote = false
 api_tls_cert = ""
 api_tls_key = ""
 api_snapshot_ttl_seconds = 30
+api_editor_public_url = ""
 
 api_write_enabled = false
 api_write_token_file = ""
