@@ -48,7 +48,7 @@ func checkPerm(src command.Source, required ...string) bool {
 	if len(required) > 0 {
 		permName = required[0]
 	}
-	_ = src.SendMessage(Msg(Prefix + "&cYou do not have permission to execute this command (&e%s&c).", permName))
+	_ = src.SendMessage(Msg(Prefix+"&cYou do not have permission to execute this command (&e%s&c).", permName))
 	return false
 }
 

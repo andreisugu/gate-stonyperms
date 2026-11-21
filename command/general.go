@@ -175,8 +175,8 @@ func HandleInfo(mgr *manager.Manager, src command.Source) error {
 
 	lines := []string{
 		Header("StonyPerms System Info"),
-		fmt.Sprintf("&bStorage Type:&r &fJSON Flat-File&r"),
-		fmt.Sprintf("&bStorage Status:&r &aConnected & Healthy&r"),
+		"&bStorage Type:&r &fJSON Flat-File&r",
+		"&bStorage Status:&r &aConnected & Healthy&r",
 		fmt.Sprintf("&bActive Users (Cached):&r &e%d&r", uCount),
 		fmt.Sprintf("&bLoaded Groups:&r &e%d&r", gCount),
 		fmt.Sprintf("&bLoaded Tracks:&r &e%d&r", tCount),
@@ -195,7 +195,7 @@ func HandleInfo(mgr *manager.Manager, src command.Source) error {
 func HandleSync(mgr *manager.Manager, src command.Source) error {
 	_ = src.SendMessage(Msg(Prefix + "&7Reloading permissions from storage...&r"))
 	if err := mgr.Reload(); err != nil {
-		return src.SendMessage(Msg(Prefix + "&cFailed to reload data: %v&r", err))
+		return src.SendMessage(Msg(Prefix+"&cFailed to reload data: %v&r", err))
 	}
 	uCount, gCount, tCount, _ := mgr.Stats()
 	mgr.LogAction(getActorName(src), "general", "system", "Reloaded storage data")
@@ -214,7 +214,7 @@ func HandleCheck(mgr *manager.Manager, src command.Source, args []string) error 
 
 	user := mgr.GetUserByName(userName)
 	if user == nil {
-		return src.SendMessage(Msg(Prefix + "&cUser '&e%s&c' not found in cache or storage.&r", userName))
+		return src.SendMessage(Msg(Prefix+"&cUser '&e%s&c' not found in cache or storage.&r", userName))
 	}
 
 	groups := make(map[string]*model.Group)
