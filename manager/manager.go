@@ -44,6 +44,7 @@ type Manager struct {
 	stopChan       chan struct{}
 	revision       atomic.Uint64
 	generation     string
+	exportDir      string
 }
 
 // EffectiveNode is a permission node together with the entity it came from.
@@ -146,6 +147,7 @@ func New(store storage.StorageProvider) (*Manager, error) {
 		subscribers: make(map[uint64]*eventSubscriber),
 		stopChan:    make(chan struct{}),
 		generation:  newGeneration(),
+		exportDir:   deriveExportDir(store),
 	}
 	m.revision.Store(1)
 
@@ -1178,16 +1180,7 @@ func (m *Manager) effectiveUserLocked(id uuid.UUID, contexts map[string]string, 
 		}
 	}
 
-	for k, v := range user.Meta {
-		eff.Meta[k] = v
-	}
-	for _, g := range resolved {
-		for k, v := range g.Meta {
-			if _, exists := eff.Meta[k]; !exists {
-				eff.Meta[k] = v
-			}
-		}
-	}
+	eff.Meta = m.engine.ResolveAllMeta(user, m.groups, contexts)
 
 	eff.Prefix = m.engine.GetPrefix(user, m.groups, contexts)
 	eff.Suffix = m.engine.GetSuffix(user, m.groups, contexts)
@@ -1275,6 +1268,9 @@ func copyUser(u *model.User) *model.User {
 	for k, v := range u.Meta {
 		cp.Meta[k] = v
 	}
+	for _, me := range u.MetaEntries {
+		cp.MetaEntries = append(cp.MetaEntries, copyMetaEntry(me))
+	}
 	for _, p := range u.Prefixes {
 		cp.Prefixes = append(cp.Prefixes, copyPriorityMeta(p))
 	}
@@ -1302,6 +1298,9 @@ func copyGroup(g *model.Group) *model.Group {
 	for k, v := range g.Meta {
 		cp.Meta[k] = v
 	}
+	for _, me := range g.MetaEntries {
+		cp.MetaEntries = append(cp.MetaEntries, copyMetaEntry(me))
+	}
 	for _, p := range g.Prefixes {
 		cp.Prefixes = append(cp.Prefixes, copyPriorityMeta(p))
 	}
@@ -1320,6 +1319,17 @@ func copyInheritance(i model.Inheritance) model.Inheritance {
 		i.Contexts = ctxs
 	}
 	return i
+}
+
+func copyMetaEntry(me model.MetaEntry) model.MetaEntry {
+	if me.Contexts != nil {
+		ctxs := make(map[string]string, len(me.Contexts))
+		for k, v := range me.Contexts {
+			ctxs[k] = v
+		}
+		me.Contexts = ctxs
+	}
+	return me
 }
 
 func copyPriorityMeta(p model.PriorityMeta) model.PriorityMeta {

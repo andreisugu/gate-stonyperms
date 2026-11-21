@@ -59,7 +59,7 @@ func buildCommandTree(alias string, p *proxy.Proxy, mgr *manager.Manager) brigod
 				"stonyperms.verbose", "stonyperms.user", "stonyperms.group", "stonyperms.track", "stonyperms.log",
 				"stonyperms.listgroups", "stonyperms.creategroup", "stonyperms.deletegroup",
 				"stonyperms.listtracks", "stonyperms.createtrack", "stonyperms.deletetrack",
-				"stonyperms.editor", "stonyperms.applyedits", "stonyperms.tree")
+				"stonyperms.editor", "stonyperms.applyedits", "stonyperms.tree", "stonyperms.search", "stonyperms.bulkupdate", "stonyperms.export", "stonyperms.import")
 		})).
 		Executes(command.Command(func(cmdCtx *command.Context) error {
 			return HandleRoot(mgr, cmdCtx.Source)
@@ -100,6 +100,11 @@ func Dispatch(mgr *manager.Manager, src command.Source, args []string) error {
 			return nil
 		}
 		return HandleSync(mgr, src)
+	case "networksync":
+		if !checkPerm(src, "stonyperms.sync") {
+			return nil
+		}
+		return HandleNetworkSync(mgr, src)
 	case "check":
 		if !checkPerm(src, "stonyperms.check") {
 			return nil
@@ -166,6 +171,26 @@ func Dispatch(mgr *manager.Manager, src command.Source, args []string) error {
 		return HandleApplyEdits(mgr, src, rest)
 	case "tree":
 		return HandleTree(mgr, src, rest)
+	case "search":
+		if !checkPerm(src, "stonyperms.search") {
+			return nil
+		}
+		return HandleSearch(mgr, src, rest)
+	case "bulkupdate":
+		if !checkPerm(src, "stonyperms.bulkupdate") {
+			return nil
+		}
+		return HandleBulkUpdate(mgr, src, rest)
+	case "export":
+		if !checkPerm(src, "stonyperms.export") {
+			return nil
+		}
+		return HandleExport(mgr, src, rest)
+	case "import":
+		if !checkPerm(src, "stonyperms.import") {
+			return nil
+		}
+		return HandleImport(mgr, src, rest)
 	default:
 		return src.SendMessage(Msg(Prefix+"&cUnknown subcommand '&e%s&c'. Type &b/sp&c for help.&r", root))
 	}
@@ -337,7 +362,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 		switch argCount {
 		case 1:
 			candidates = []string{
-				"help", "info", "sync", "check", "verbose", "editor", "applyedits", "tree",
+				"help", "info", "sync", "networksync", "check", "search", "bulkupdate", "export", "import", "verbose", "editor", "applyedits", "tree",
 				"creategroup", "deletegroup", "listgroups", "createtrack", "deletetrack", "listtracks",
 				"user", "group", "track", "log",
 			}
@@ -373,6 +398,15 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 				candidates = []string{".", "gate", "stonyperms", "bettertab", "simplewhitelist", "smartlimbo", "skinschanger", "discord4gate"}
 			case "log", "logs":
 				candidates = []string{"recent", "search", "userhistory", "grouphistory", "trackhistory"}
+			case "search":
+				candidates = append(candidates, commonPermNodes...)
+				for _, g := range mgr.GetGroups() {
+					candidates = append(candidates, "group."+g.Name)
+				}
+			case "bulkupdate":
+				candidates = []string{"all", "users", "groups", "confirm"}
+			case "export":
+				candidates = []string{"backup.json", "backup.json.gz"}
 			}
 
 		case 3:
@@ -388,6 +422,14 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 				candidates = commonPermNodes
 			case "creategroup":
 				candidates = priorities
+			case "bulkupdate":
+				if len(args) > 1 && !strings.EqualFold(args[1], "confirm") {
+					candidates = []string{"update", "delete"}
+				}
+			case "import":
+				candidates = []string{"--replace"}
+			case "search":
+				candidates = []string{"1", "2", "3"}
 			case "log", "logs":
 				sub := strings.ToLower(args[1])
 				switch sub {
@@ -421,11 +463,11 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			if root == "user" || root == "u" {
 				switch sub {
 				case "permission", "perm", "p":
-					candidates = []string{"set", "unset", "settemp", "unsettemp", "check", "clear"}
+					candidates = []string{"set", "unset", "settemp", "unsettemp", "check", "info", "clear"}
 				case "parent", "parents":
-					candidates = []string{"info", "add", "set", "remove", "switchprimarygroup", "addtemp", "clear"}
+					candidates = []string{"info", "add", "set", "remove", "switchprimarygroup", "addtemp", "removetemp", "settrack", "cleartrack", "clear"}
 				case "meta", "m":
-					candidates = []string{"info", "set", "unset", "setprefix", "setsuffix", "removeprefix", "removesuffix", "clear"}
+					candidates = []string{"info", "set", "unset", "settemp", "unsettemp", "addprefix", "setprefix", "addtempprefix", "settempprefix", "removeprefix", "removetempprefix", "addsuffix", "setsuffix", "addtempsuffix", "settempsuffix", "removesuffix", "removetempsuffix", "clear"}
 				case "promote", "demote":
 					for _, t := range mgr.GetTracks() {
 						candidates = append(candidates, t.Name)
@@ -442,11 +484,11 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			} else if root == "group" || root == "g" {
 				switch sub {
 				case "permission", "perm", "p":
-					candidates = []string{"set", "unset", "settemp", "unsettemp", "check", "clear"}
+					candidates = []string{"set", "unset", "settemp", "unsettemp", "check", "info", "clear"}
 				case "parent", "parents":
-					candidates = []string{"info", "add", "set", "remove", "addtemp", "clear"}
+					candidates = []string{"info", "add", "set", "remove", "addtemp", "removetemp", "settrack", "cleartrack", "clear"}
 				case "meta", "m":
-					candidates = []string{"info", "set", "unset", "setprefix", "setsuffix", "removeprefix", "removesuffix", "clear"}
+					candidates = []string{"info", "set", "unset", "settemp", "unsettemp", "addprefix", "setprefix", "addtempprefix", "settempprefix", "removeprefix", "removetempprefix", "addsuffix", "setsuffix", "addtempsuffix", "settempsuffix", "removesuffix", "removetempsuffix", "clear"}
 				case "setweight", "weight":
 					candidates = priorities
 				}
@@ -466,6 +508,8 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 				}
 			} else if root == "check" {
 				candidates = serverContextSuggestions()
+			} else if root == "bulkupdate" && strings.EqualFold(args[2], "update") {
+				candidates = []string{"permission", "server", "world"}
 			} else if root == "log" || root == "logs" {
 				candidates = []string{"1", "2", "3", "4", "5"}
 			}
@@ -500,7 +544,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 						for _, g := range mgr.GetGroups() {
 							candidates = append(candidates, g.Name)
 						}
-					case "remove":
+					case "remove", "removetemp":
 						if u != nil {
 							for _, p := range u.Parents {
 								candidates = append(candidates, p.Group)
@@ -509,29 +553,33 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 						for _, g := range mgr.GetGroups() {
 							candidates = append(candidates, g.Name)
 						}
+					case "settrack", "cleartrack":
+						for _, t := range mgr.GetTracks() {
+							candidates = append(candidates, t.Name)
+						}
 					case "clear":
 						candidates = serverContextSuggestions()
 					}
 				} else if sub == "meta" || sub == "m" {
 					switch action {
-					case "set":
+					case "set", "settemp":
 						candidates = []string{"prefix", "suffix", "primary-group", "rank-color", "custom-tag"}
-					case "unset":
+					case "unset", "unsettemp":
 						if u != nil {
 							for k := range u.Meta {
 								candidates = append(candidates, k)
 							}
 						}
-					case "setprefix", "setsuffix":
+					case "setprefix", "setsuffix", "addprefix", "addsuffix", "addtempprefix", "settempprefix", "addtempsuffix", "settempsuffix":
 						candidates = priorities
-					case "removeprefix":
+					case "removeprefix", "removetempprefix":
 						if u != nil {
 							for _, p := range u.Prefixes {
 								candidates = append(candidates, strconv.Itoa(p.Priority))
 							}
 						}
 						candidates = append(candidates, priorities...)
-					case "removesuffix":
+					case "removesuffix", "removetempsuffix":
 						if u != nil {
 							for _, s := range u.Suffixes {
 								candidates = append(candidates, strconv.Itoa(s.Priority))
@@ -566,7 +614,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 								candidates = append(candidates, g.Name)
 							}
 						}
-					case "remove":
+					case "remove", "removetemp":
 						if grp != nil {
 							for _, p := range grp.Parents {
 								candidates = append(candidates, p.Group)
@@ -575,24 +623,24 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 					}
 				} else if sub == "meta" || sub == "m" {
 					switch action {
-					case "set":
+					case "set", "settemp":
 						candidates = []string{"prefix", "suffix", "display-name", "color"}
-					case "unset":
+					case "unset", "unsettemp":
 						if grp != nil {
 							for k := range grp.Meta {
 								candidates = append(candidates, k)
 							}
 						}
-					case "setprefix", "setsuffix":
+					case "setprefix", "setsuffix", "addprefix", "addsuffix", "addtempprefix", "settempprefix", "addtempsuffix", "settempsuffix":
 						candidates = priorities
-					case "removeprefix":
+					case "removeprefix", "removetempprefix":
 						if grp != nil {
 							for _, p := range grp.Prefixes {
 								candidates = append(candidates, strconv.Itoa(p.Priority))
 							}
 						}
 						candidates = append(candidates, priorities...)
-					case "removesuffix":
+					case "removesuffix", "removetempsuffix":
 						if grp != nil {
 							for _, s := range grp.Suffixes {
 								candidates = append(candidates, strconv.Itoa(s.Priority))
@@ -625,9 +673,9 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 					candidates = serverContextSuggestions()
 				}
 			} else if (root == "user" || root == "u" || root == "group" || root == "g") && (sub == "meta" || sub == "m") {
-				if action == "setprefix" {
+				if action == "setprefix" || action == "addprefix" || action == "addtempprefix" || action == "settempprefix" {
 					candidates = []string{"\"&7[Member] \"", "\"&a[VIP] \"", "\"&9[Mod] \"", "\"&c[Admin] \""}
-				} else if action == "setsuffix" {
+				} else if action == "setsuffix" || action == "addsuffix" || action == "addtempsuffix" || action == "settempsuffix" {
 					candidates = []string{"\" &7[PRO]\"", "\" &e★\"", "\" &b[MVP]\""}
 				}
 			}
@@ -656,7 +704,11 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 
 			if (root == "user" || root == "u" || root == "group" || root == "g") && (sub == "permission" || sub == "perm" || sub == "p") {
 				if action == "settemp" {
-					candidates = serverContextSuggestions()
+					candidates = append([]string{"accumulate", "replace", "deny"}, serverContextSuggestions()...)
+				}
+			} else if (root == "user" || root == "u" || root == "group" || root == "g") && (sub == "parent" || sub == "parents") {
+				if action == "addtemp" {
+					candidates = append([]string{"accumulate", "replace", "deny"}, serverContextSuggestions()...)
 				}
 			}
 		}

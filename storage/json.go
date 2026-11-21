@@ -41,6 +41,11 @@ func NewJSONStorage(baseDir string) (*JSONStorage, error) {
 	return js, nil
 }
 
+// BaseDir returns the root directory of the JSON storage provider.
+func (js *JSONStorage) BaseDir() string {
+	return js.baseDir
+}
+
 func (js *JSONStorage) groupsPath() string {
 	return filepath.Join(js.baseDir, "groups.json")
 }

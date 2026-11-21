@@ -15,6 +15,7 @@ type User struct {
 	Parents      []Inheritance     `json:"parents,omitempty"`
 	Nodes        []Node            `json:"nodes,omitempty"`
 	Meta         map[string]string `json:"meta,omitempty"`
+	MetaEntries  []MetaEntry       `json:"metaEntries,omitempty"`
 	Prefixes     []PriorityMeta    `json:"prefixes,omitempty"`
 	Suffixes     []PriorityMeta    `json:"suffixes,omitempty"`
 }
@@ -28,6 +29,7 @@ func NewUser(id uuid.UUID, username string) *User {
 		Parents:      make([]Inheritance, 0),
 		Nodes:        make([]Node, 0),
 		Meta:         make(map[string]string),
+		MetaEntries:  make([]MetaEntry, 0),
 		Prefixes:     make([]PriorityMeta, 0),
 		Suffixes:     make([]PriorityMeta, 0),
 	}
@@ -35,14 +37,12 @@ func NewUser(id uuid.UUID, username string) *User {
 
 // AddNode adds or updates a permission node for this user.
 func (u *User) AddNode(node Node) {
-	node.Key = strings.ToLower(strings.TrimSpace(node.Key))
-	for i, existing := range u.Nodes {
-		if existing.Key == node.Key && SameContexts(existing.Contexts, node.Contexts) {
-			u.Nodes[i] = node
-			return
-		}
-	}
-	u.Nodes = append(u.Nodes, node)
+	_, _ = u.AddNodeWithModifier(node, TempModifierReplace, time.Now())
+}
+
+// AddNodeWithModifier adds or updates a permission node respecting temporary modifiers.
+func (u *User) AddNodeWithModifier(node Node, mod TempModifier, now time.Time) (Node, error) {
+	return addNodeWithModifier(&u.Nodes, node, mod, now)
 }
 
 // RemoveNode removes a permission node by key and context. Returns true if removed.
@@ -57,16 +57,19 @@ func (u *User) RemoveNode(key string, contexts map[string]string) bool {
 	return false
 }
 
+// RemoveTempNode removes a temporary permission node by key and context.
+func (u *User) RemoveTempNode(key string, contexts map[string]string) bool {
+	return removeTempNode(&u.Nodes, key, contexts)
+}
+
 // AddParent adds an inherited parent group.
 func (u *User) AddParent(inh Inheritance) {
-	inh.Group = strings.ToLower(strings.TrimSpace(inh.Group))
-	for i, existing := range u.Parents {
-		if existing.Group == inh.Group && SameContexts(existing.Contexts, inh.Contexts) {
-			u.Parents[i] = inh
-			return
-		}
-	}
-	u.Parents = append(u.Parents, inh)
+	_, _ = u.AddParentWithModifier(inh, TempModifierReplace, time.Now())
+}
+
+// AddParentWithModifier adds an inherited parent group respecting temporary modifiers.
+func (u *User) AddParentWithModifier(inh Inheritance, mod TempModifier, now time.Time) (Inheritance, error) {
+	return addParentWithModifier(&u.Parents, inh, mod, now)
 }
 
 // RemoveParent removes a parent group inheritance.
@@ -81,119 +84,84 @@ func (u *User) RemoveParent(groupName string, contexts map[string]string) bool {
 	return false
 }
 
+// RemoveTempParent removes a temporary parent group inheritance.
+func (u *User) RemoveTempParent(groupName string, contexts map[string]string) bool {
+	return removeTempParent(&u.Parents, groupName, contexts)
+}
+
 // SetMeta sets a metadata key-value pair.
 func (u *User) SetMeta(key, value string) {
-	if u.Meta == nil {
-		u.Meta = make(map[string]string)
-	}
-	u.Meta[key] = value
+	_, _ = u.SetMetaEntry(MetaEntry{Key: key, Value: value}, TempModifierReplace, time.Now())
+}
+
+// SetMetaEntry sets a permanent, temporary, or contextual metadata entry.
+func (u *User) SetMetaEntry(entry MetaEntry, mod TempModifier, now time.Time) (MetaEntry, error) {
+	return setMetaEntry(&u.Meta, &u.MetaEntries, entry, mod, now)
 }
 
 // UnsetMeta removes a metadata key-value pair.
 func (u *User) UnsetMeta(key string) bool {
-	if u.Meta == nil {
-		return false
-	}
-	if _, ok := u.Meta[key]; ok {
-		delete(u.Meta, key)
-		return true
-	}
-	return false
+	return u.UnsetMetaEntry(key, nil, false)
+}
+
+// UnsetMetaEntry removes metadata entries matching key, contexts, and tempOnly filter.
+func (u *User) UnsetMetaEntry(key string, contexts map[string]string, tempOnly bool) bool {
+	return unsetMetaEntry(&u.Meta, &u.MetaEntries, key, contexts, tempOnly)
 }
 
 // AddPrefix adds a prefix with priority.
 func (u *User) AddPrefix(pm PriorityMeta) {
-	for i, existing := range u.Prefixes {
-		if existing.Priority == pm.Priority && SameContexts(existing.Contexts, pm.Contexts) {
-			u.Prefixes[i] = pm
-			return
-		}
-	}
-	u.Prefixes = append(u.Prefixes, pm)
+	_, _ = u.AddPrefixWithModifier(pm, TempModifierReplace, time.Now())
+}
+
+// AddPrefixWithModifier adds a prefix respecting temporary modifiers.
+func (u *User) AddPrefixWithModifier(pm PriorityMeta, mod TempModifier, now time.Time) (PriorityMeta, error) {
+	return addAffixWithModifier(&u.Prefixes, pm, mod, now)
+}
+
+// SetPrefixInContext replaces prefixes sharing pm.Contexts before adding pm.
+func (u *User) SetPrefixInContext(pm PriorityMeta) {
+	setAffixInContext(&u.Prefixes, pm)
 }
 
 // RemovePrefix removes a prefix matching priority.
 func (u *User) RemovePrefix(priority int) bool {
-	for i, existing := range u.Prefixes {
-		if existing.Priority == priority {
-			u.Prefixes = append(u.Prefixes[:i], u.Prefixes[i+1:]...)
-			return true
-		}
-	}
-	return false
+	return u.RemovePrefixMatch(priority, "", nil, false)
+}
+
+// RemovePrefixMatch removes prefixes matching priority, optional value, optional contexts, and tempOnly.
+func (u *User) RemovePrefixMatch(priority int, value string, contexts map[string]string, tempOnly bool) bool {
+	return removeAffixMatch(&u.Prefixes, priority, value, contexts, tempOnly)
 }
 
 // AddSuffix adds a suffix with priority.
 func (u *User) AddSuffix(pm PriorityMeta) {
-	for i, existing := range u.Suffixes {
-		if existing.Priority == pm.Priority && SameContexts(existing.Contexts, pm.Contexts) {
-			u.Suffixes[i] = pm
-			return
-		}
-	}
-	u.Suffixes = append(u.Suffixes, pm)
+	_, _ = u.AddSuffixWithModifier(pm, TempModifierReplace, time.Now())
+}
+
+// AddSuffixWithModifier adds a suffix respecting temporary modifiers.
+func (u *User) AddSuffixWithModifier(pm PriorityMeta, mod TempModifier, now time.Time) (PriorityMeta, error) {
+	return addAffixWithModifier(&u.Suffixes, pm, mod, now)
+}
+
+// SetSuffixInContext replaces suffixes sharing pm.Contexts before adding pm.
+func (u *User) SetSuffixInContext(pm PriorityMeta) {
+	setAffixInContext(&u.Suffixes, pm)
 }
 
 // RemoveSuffix removes a suffix matching priority.
 func (u *User) RemoveSuffix(priority int) bool {
-	for i, existing := range u.Suffixes {
-		if existing.Priority == priority {
-			u.Suffixes = append(u.Suffixes[:i], u.Suffixes[i+1:]...)
-			return true
-		}
-	}
-	return false
+	return u.RemoveSuffixMatch(priority, "", nil, false)
+}
+
+// RemoveSuffixMatch removes suffixes matching priority, optional value, optional contexts, and tempOnly.
+func (u *User) RemoveSuffixMatch(priority int, value string, contexts map[string]string, tempOnly bool) bool {
+	return removeAffixMatch(&u.Suffixes, priority, value, contexts, tempOnly)
 }
 
 // CleanExpired removes any temporary permissions, groups, or meta that have expired.
 func (u *User) CleanExpired(now time.Time) int {
-	cleaned := 0
-
-	// Nodes
-	activeNodes := make([]Node, 0, len(u.Nodes))
-	for _, n := range u.Nodes {
-		if n.IsExpired(now) {
-			cleaned++
-		} else {
-			activeNodes = append(activeNodes, n)
-		}
-	}
-	u.Nodes = activeNodes
-
-	// Parents
-	activeParents := make([]Inheritance, 0, len(u.Parents))
-	for _, p := range u.Parents {
-		if p.IsExpired(now) {
-			cleaned++
-		} else {
-			activeParents = append(activeParents, p)
-		}
-	}
-	u.Parents = activeParents
-
-	// Prefixes
-	activePrefixes := make([]PriorityMeta, 0, len(u.Prefixes))
-	for _, p := range u.Prefixes {
-		if p.IsExpired(now) {
-			cleaned++
-		} else {
-			activePrefixes = append(activePrefixes, p)
-		}
-	}
-	u.Prefixes = activePrefixes
-
-	// Suffixes
-	activeSuffixes := make([]PriorityMeta, 0, len(u.Suffixes))
-	for _, s := range u.Suffixes {
-		if s.IsExpired(now) {
-			cleaned++
-		} else {
-			activeSuffixes = append(activeSuffixes, s)
-		}
-	}
-	u.Suffixes = activeSuffixes
-
-	return cleaned
+	return cleanExpiredCommon(&u.Nodes, &u.Parents, &u.Prefixes, &u.Suffixes, &u.MetaEntries, now)
 }
 
 // ClearAll removes all direct nodes, parents, meta, prefixes, and suffixes.
@@ -201,6 +169,7 @@ func (u *User) ClearAll() {
 	u.Nodes = make([]Node, 0)
 	u.Parents = make([]Inheritance, 0)
 	u.Meta = make(map[string]string)
+	u.MetaEntries = make([]MetaEntry, 0)
 	u.Prefixes = make([]PriorityMeta, 0)
 	u.Suffixes = make([]PriorityMeta, 0)
 	u.PrimaryGroup = "default"
@@ -215,6 +184,7 @@ func (u *User) Clone(targetUUID uuid.UUID, targetUsername string) *User {
 	for k, v := range u.Meta {
 		cloned.Meta[k] = v
 	}
+	cloned.MetaEntries = cloneMetaEntries(u.MetaEntries)
 	cloned.Prefixes = append(cloned.Prefixes, u.Prefixes...)
 	cloned.Suffixes = append(cloned.Suffixes, u.Suffixes...)
 	return cloned

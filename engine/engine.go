@@ -48,9 +48,23 @@ type VerboseRecording struct {
 	Entries    []VerboseEntry `json:"entries"`
 }
 
+// StackConfig configures LuckPerms-style prefix and suffix stacking.
+type StackConfig struct {
+	PrefixEnabled     bool
+	PrefixStartSpacer string
+	PrefixMidSpacer   string
+	PrefixEndSpacer   string
+	SuffixEnabled     bool
+	SuffixStartSpacer string
+	SuffixMidSpacer   string
+	SuffixEndSpacer   string
+	Deduplicate       bool
+}
+
 // Engine performs high-performance permission, metadata, and inheritance calculations.
 type Engine struct {
 	mu            sync.RWMutex
+	stackCfg      StackConfig
 	verboseActive bool
 	verboseFilter VerboseFilter
 	verboseLog    VerboseLogger
@@ -66,7 +80,23 @@ type Engine struct {
 
 // New creates a new permission calculation engine.
 func New() *Engine {
-	return &Engine{}
+	return &Engine{
+		stackCfg: StackConfig{Deduplicate: true},
+	}
+}
+
+// SetStackConfig updates prefix/suffix stacking behavior.
+func (e *Engine) SetStackConfig(cfg StackConfig) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.stackCfg = cfg
+}
+
+// GetStackConfig returns the current prefix/suffix stacking configuration.
+func (e *Engine) GetStackConfig() StackConfig {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.stackCfg
 }
 
 // SetVerbose enables or disables real-time verbose inspection logging.
@@ -438,28 +468,119 @@ func (e *Engine) ResolveGroupHierarchy(root *model.Group, groups map[string]*mod
 	return result
 }
 
-// GetPrefix resolves the highest priority active prefix for a user,
-// giving precedence to direct user prefixes, then the user's explicit non-default
-// primary group, and finally inherited groups.
+// GetPrefix resolves the user's prefix, using prefix stacking if enabled or
+// primary-group priority precedence otherwise.
 func (e *Engine) GetPrefix(user *model.User, groups map[string]*model.Group, contexts map[string]string) string {
 	if user == nil {
 		return ""
+	}
+	stackCfg := e.GetStackConfig()
+	if stackCfg.PrefixEnabled {
+		if stacked := e.GetStackedPrefix(user, groups, contexts); stacked != "" {
+			return stacked
+		}
 	}
 	return e.resolveAffix(user, groups, contexts, user.Prefixes, func(g *model.Group) []model.PriorityMeta {
 		return g.Prefixes
 	})
 }
 
-// GetSuffix resolves the highest priority active suffix for a user,
-// giving precedence to direct user suffixes, then the user's explicit non-default
-// primary group, and finally inherited groups.
+// GetSuffix resolves the user's suffix, using suffix stacking if enabled or
+// primary-group priority precedence otherwise.
 func (e *Engine) GetSuffix(user *model.User, groups map[string]*model.Group, contexts map[string]string) string {
 	if user == nil {
 		return ""
 	}
+	stackCfg := e.GetStackConfig()
+	if stackCfg.SuffixEnabled {
+		if stacked := e.GetStackedSuffix(user, groups, contexts); stacked != "" {
+			return stacked
+		}
+	}
 	return e.resolveAffix(user, groups, contexts, user.Suffixes, func(g *model.Group) []model.PriorityMeta {
 		return g.Suffixes
 	})
+}
+
+// GetStackedPrefix formats all active context-matching prefixes ordered by priority descending.
+func (e *Engine) GetStackedPrefix(user *model.User, groups map[string]*model.Group, contexts map[string]string) string {
+	stackCfg := e.GetStackConfig()
+	return e.formatStackedAffix(
+		user, groups, contexts,
+		user.Prefixes, func(g *model.Group) []model.PriorityMeta { return g.Prefixes },
+		stackCfg.PrefixStartSpacer, stackCfg.PrefixMidSpacer, stackCfg.PrefixEndSpacer, stackCfg.Deduplicate,
+	)
+}
+
+// GetStackedSuffix formats all active context-matching suffixes ordered by priority descending.
+func (e *Engine) GetStackedSuffix(user *model.User, groups map[string]*model.Group, contexts map[string]string) string {
+	stackCfg := e.GetStackConfig()
+	return e.formatStackedAffix(
+		user, groups, contexts,
+		user.Suffixes, func(g *model.Group) []model.PriorityMeta { return g.Suffixes },
+		stackCfg.SuffixStartSpacer, stackCfg.SuffixMidSpacer, stackCfg.SuffixEndSpacer, stackCfg.Deduplicate,
+	)
+}
+
+func (e *Engine) formatStackedAffix(
+	user *model.User,
+	groups map[string]*model.Group,
+	contexts map[string]string,
+	direct []model.PriorityMeta,
+	groupAffixes func(*model.Group) []model.PriorityMeta,
+	startSpacer, midSpacer, endSpacer string,
+	deduplicate bool,
+) string {
+	if user == nil {
+		return ""
+	}
+	now := time.Now()
+	type rankedAffix struct {
+		priority int
+		order    int
+		value    string
+	}
+	var all []rankedAffix
+	order := 0
+	for _, item := range direct {
+		if !item.IsExpired(now) && item.MatchesContext(contexts) && item.Value != "" {
+			all = append(all, rankedAffix{priority: item.Priority, order: order, value: item.Value})
+			order++
+		}
+	}
+	for _, g := range e.ResolveInheritedGroups(user, groups, contexts, now) {
+		for _, item := range groupAffixes(g) {
+			if !item.IsExpired(now) && item.MatchesContext(contexts) && item.Value != "" {
+				all = append(all, rankedAffix{priority: item.Priority, order: order, value: item.Value})
+				order++
+			}
+		}
+	}
+	if len(all) == 0 {
+		return ""
+	}
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].priority != all[j].priority {
+			return all[i].priority > all[j].priority
+		}
+		return all[i].order < all[j].order
+	})
+
+	var values []string
+	seen := make(map[string]struct{}, len(all))
+	for _, a := range all {
+		if deduplicate {
+			if _, exists := seen[a.value]; exists {
+				continue
+			}
+			seen[a.value] = struct{}{}
+		}
+		values = append(values, a.value)
+	}
+	if len(values) == 0 {
+		return ""
+	}
+	return startSpacer + strings.Join(values, midSpacer) + endSpacer
 }
 
 func highestActiveAffix(items []model.PriorityMeta, contexts map[string]string, now time.Time) *model.PriorityMeta {
@@ -512,14 +633,61 @@ func (e *Engine) resolveAffix(
 
 // GetMeta resolves a custom metadata key for a user (direct overrides group).
 func (e *Engine) GetMeta(user *model.User, groups map[string]*model.Group, key string) (string, bool) {
-	if val, ok := user.Meta[key]; ok {
+	return e.GetMetaWithContext(user, groups, key, nil)
+}
+
+// GetMetaWithContext resolves a custom metadata key honoring active contextual and temporary entries.
+func (e *Engine) GetMetaWithContext(user *model.User, groups map[string]*model.Group, key string, contexts map[string]string) (string, bool) {
+	all := e.ResolveAllMeta(user, groups, contexts)
+	if val, ok := all[key]; ok {
 		return val, true
 	}
-	resolved := e.ResolveInheritedGroups(user, groups, nil, time.Now())
-	for _, g := range resolved {
-		if val, ok := g.Meta[key]; ok {
-			return val, true
+	for k, v := range all {
+		if strings.EqualFold(k, key) {
+			return v, true
 		}
 	}
 	return "", false
+}
+
+// ResolveAllMeta computes all effective metadata keys for a user in the supplied contexts.
+// Resolution priority: user MetaEntries (most specific context -> highest priority) > user Meta >
+// resolved groups in descending weight order (group MetaEntries > group Meta).
+func (e *Engine) ResolveAllMeta(user *model.User, groups map[string]*model.Group, contexts map[string]string) map[string]string {
+	result := make(map[string]string)
+	if user == nil {
+		return result
+	}
+	now := time.Now()
+
+	applyMetaEntries := func(entries []model.MetaEntry, staticMeta map[string]string) {
+		var matching []model.MetaEntry
+		for _, entry := range entries {
+			if !entry.IsExpired(now) && entry.MatchesContext(contexts) {
+				matching = append(matching, entry)
+			}
+		}
+		sort.SliceStable(matching, func(i, j int) bool {
+			if len(matching[i].Contexts) != len(matching[j].Contexts) {
+				return len(matching[i].Contexts) > len(matching[j].Contexts)
+			}
+			return matching[i].Priority > matching[j].Priority
+		})
+		for _, entry := range matching {
+			if _, exists := result[entry.Key]; !exists {
+				result[entry.Key] = entry.Value
+			}
+		}
+		for k, v := range staticMeta {
+			if _, exists := result[k]; !exists {
+				result[k] = v
+			}
+		}
+	}
+
+	applyMetaEntries(user.MetaEntries, user.Meta)
+	for _, g := range e.ResolveInheritedGroups(user, groups, contexts, now) {
+		applyMetaEntries(g.MetaEntries, g.Meta)
+	}
+	return result
 }

@@ -84,6 +84,17 @@ api_snapshot_ttl_seconds = 30
 # through a different hostname, a reverse proxy, or HTTPS termination.
 # Example: api_editor_public_url = "https://perms.example.com"
 api_editor_public_url = ""
+
+# Prefix / Suffix stacking (LuckPerms meta-formatting style)
+prefix_stacking = false
+prefix_start_spacer = ""
+prefix_middle_spacer = ""
+prefix_end_spacer = ""
+suffix_stacking = false
+suffix_start_spacer = ""
+suffix_middle_spacer = ""
+suffix_end_spacer = ""
+stack_deduplicate = true
 `
 
 // Config represents the top-level StonyPerms configuration.
@@ -113,6 +124,16 @@ type Config struct {
 	APISSEEnabled           bool    `toml:"api_sse_enabled"`
 	APISSEMaxClients        int     `toml:"api_sse_max_clients"`
 	APIEditorPublicURL      string  `toml:"api_editor_public_url"`
+
+	PrefixStacking     bool   `toml:"prefix_stacking"`
+	PrefixStartSpacer  string `toml:"prefix_start_spacer"`
+	PrefixMiddleSpacer string `toml:"prefix_middle_spacer"`
+	PrefixEndSpacer    string `toml:"prefix_end_spacer"`
+	SuffixStacking     bool   `toml:"suffix_stacking"`
+	SuffixStartSpacer  string `toml:"suffix_start_spacer"`
+	SuffixMiddleSpacer string `toml:"suffix_middle_spacer"`
+	SuffixEndSpacer    string `toml:"suffix_end_spacer"`
+	StackDeduplicate   bool   `toml:"stack_deduplicate"`
 }
 
 func defaultConfig() *Config {
@@ -133,6 +154,7 @@ func defaultConfig() *Config {
 		APIWriteRateLimitBurst:  30,
 		APISSEEnabled:           true,
 		APISSEMaxClients:        32,
+		StackDeduplicate:        true,
 	}
 }
 
