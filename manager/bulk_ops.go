@@ -205,7 +205,7 @@ type BulkConstraint struct {
 	Pattern  string
 }
 
-// BulkUpdateOptions defines a LuckPerms-style mass update or delete across users and/or groups.
+// BulkUpdateOptions defines a mass update or delete across users and/or groups.
 type BulkUpdateOptions struct {
 	Scope       string // "all", "users", "groups"
 	Action      string // "update", "delete"

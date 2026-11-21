@@ -2,7 +2,7 @@
 
 # 💎 Gate StonyPerms
 
-**Lightning-fast, LuckPerms-compatible permissions engine & cross-server HTTP + SSE platform for Minekube Gate.**
+**Lightning-fast, contextual permissions engine & cross-server HTTP + SSE platform for Minekube Gate.**
 
 <p>
   <a href="https://github.com/andreisugu/gate-stonyperms/actions/workflows/ci.yml"><img src="https://github.com/andreisugu/gate-stonyperms/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
@@ -29,7 +29,7 @@
 
 ## ✨ Key Features
 
-- **LuckPerms-Style CLI (`/sp`):** Complete `user`, `group`, `track`, `check`, `search`, `bulkupdate`, `export`/`import`, `networksync`, `verbose`, and `log` trees with Brigadier auto-completion.
+- **Full Admin CLI (`/sp`):** Complete `user`, `group`, `track`, `check`, `search`, `bulkupdate`, `export`/`import`, `networksync`, `verbose`, and `log` trees with Brigadier auto-completion.
 - **Exact + Wildcard + Explicit Deny Evaluation:** Supports exact nodes (`gate.command.server`), sub-wildcards (`gate.command.*`, `*`), explicit `false` denials, and circular inheritance protection.
 - **Dynamic Contexts & Temporary Modifiers:** Per-server/world contexts (`server=lobby`) and expiring permissions, parents, custom meta keys, prefixes, and suffixes with `accumulate`, `replace`, and `deny` collision modifiers.
 - **Weighted Inheritance, Tracks & Affix Stacking:** Groups resolve in descending weight order alongside promotion tracks (`settrack`/`cleartrack`), contextual metadata keys, and optional priority-ordered prefix/suffix stacking with custom spacers and deduplication.
@@ -284,7 +284,7 @@ if mgr := stonyperms.GetManager(); mgr != nil {
 
 | Project | Role | Stack |
 | :--- | :--- | :--- |
-| **[`gate-stonyperms`](https://github.com/andreisugu/gate-stonyperms)** *(this repo)* | LuckPerms-style permissions, contexts, tracks & v0.2 R/W HTTP + SSE API | `Go 1.26` |
+| **[`gate-stonyperms`](https://github.com/andreisugu/gate-stonyperms)** *(this repo)* | Context-aware permissions, tracks, Web UI & v0.2 R/W HTTP + SSE API | `Go 1.26` |
 | [`stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge) | Paper & Fabric permission adapters, live SSE, `/spb` commands, Vault & PAPI | `Java 25` |
 | [`gate-bettertab`](https://github.com/andreisugu/gate-bettertab) | Animated RGB / MiniMessage TAB lists, server groups, weights & placeholders | `Go 1.26` |
 | [`gate-discord4gate`](https://github.com/andreisugu/gate-discord4gate) | Bidirectional Discord <> Minecraft chat, slash commands & webhook avatars | `Go 1.26` |

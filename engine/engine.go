@@ -48,7 +48,7 @@ type VerboseRecording struct {
 	Entries    []VerboseEntry `json:"entries"`
 }
 
-// StackConfig configures LuckPerms-style prefix and suffix stacking.
+// StackConfig configures priority prefix and suffix stacking.
 type StackConfig struct {
 	PrefixEnabled     bool
 	PrefixStartSpacer string

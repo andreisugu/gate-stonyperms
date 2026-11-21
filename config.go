@@ -88,7 +88,7 @@ api_snapshot_ttl_seconds = 30
 # Example: api_editor_public_url = "https://perms.example.com"
 api_editor_public_url = ""
 
-# Prefix / Suffix stacking (LuckPerms meta-formatting style)
+# Prefix / Suffix stacking spacers & deduplication
 prefix_stacking = false
 prefix_start_spacer = ""
 prefix_middle_spacer = ""
