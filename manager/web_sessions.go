@@ -1115,10 +1115,11 @@ func sanitizeEditorGroup(raw *model.Group) (*model.Group, error) {
 	}
 	g.Parents = parents
 
-	meta, err := sanitizeEditorMeta(raw.Meta)
+	metaEntries, meta, err := sanitizeEditorMetaEntries(raw.MetaEntries, raw.Meta)
 	if err != nil {
 		return nil, fmt.Errorf("group %q: %w", name, err)
 	}
+	g.MetaEntries = metaEntries
 	g.Meta = meta
 
 	prefixes, err := sanitizeEditorPriorityMeta(raw.Prefixes)
@@ -1195,10 +1196,11 @@ func sanitizeEditorUser(raw *model.User) (*model.User, error) {
 	}
 	u.Parents = parents
 
-	meta, err := sanitizeEditorMeta(raw.Meta)
+	metaEntries, meta, err := sanitizeEditorMetaEntries(raw.MetaEntries, raw.Meta)
 	if err != nil {
 		return nil, fmt.Errorf("user %q: %w", uid, err)
 	}
+	u.MetaEntries = metaEntries
 	u.Meta = meta
 
 	prefixes, err := sanitizeEditorPriorityMeta(raw.Prefixes)
@@ -1286,6 +1288,54 @@ func sanitizeEditorMeta(in map[string]string) (map[string]string, error) {
 		out[key] = v
 	}
 	return out, nil
+}
+
+func sanitizeEditorMetaEntries(in []model.MetaEntry, rawMeta map[string]string) ([]model.MetaEntry, map[string]string, error) {
+	outMeta, err := sanitizeEditorMeta(rawMeta)
+	if err != nil {
+		return nil, nil, err
+	}
+	var outEntries []model.MetaEntry
+	coveredGlobal := make(map[string]struct{}, len(in))
+	for _, me := range in {
+		key := strings.TrimSpace(me.Key)
+		if key == "" || len(key) > 64 || hasControlChars(key) {
+			return nil, nil, fmt.Errorf("invalid meta key %q", me.Key)
+		}
+		if err := validateEditorText(me.Value); err != nil {
+			return nil, nil, fmt.Errorf("invalid meta value for %q: %w", key, err)
+		}
+		ctxs, err := sanitizeEditorContexts(me.Contexts)
+		if err != nil {
+			return nil, nil, err
+		}
+		expiry := me.Expiry
+		if expiry < 0 {
+			expiry = 0
+		}
+		outEntries = append(outEntries, model.MetaEntry{
+			Key:      key,
+			Value:    me.Value,
+			Priority: me.Priority,
+			Expiry:   expiry,
+			Contexts: ctxs,
+		})
+		if expiry == 0 && len(ctxs) == 0 {
+			coveredGlobal[strings.ToLower(key)] = struct{}{}
+			if _, exists := outMeta[key]; !exists {
+				outMeta[key] = me.Value
+			}
+		}
+	}
+	for k, v := range outMeta {
+		if _, seen := coveredGlobal[strings.ToLower(k)]; !seen {
+			outEntries = append(outEntries, model.MetaEntry{
+				Key:   k,
+				Value: v,
+			})
+		}
+	}
+	return outEntries, outMeta, nil
 }
 
 func sanitizeEditorPriorityMeta(in []model.PriorityMeta) ([]model.PriorityMeta, error) {

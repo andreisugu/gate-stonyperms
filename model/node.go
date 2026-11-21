@@ -1,6 +1,8 @@
 package model
 
 import (
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -112,29 +114,178 @@ func (n Node) MatchesContext(queryContexts map[string]string) bool {
 	return true
 }
 
+const maxShorthandExpansions = 128
+
+// ExpandShorthand expands LuckPerms-style shorthand patterns such as "{a,b}",
+// "(a|b)", and integer ranges "{1-5}" up to maxShorthandExpansions items.
+// Regex keys prefixed with "r=" are returned unmodified.
+func ExpandShorthand(pattern string) []string {
+	trimmed := strings.TrimSpace(pattern)
+	if trimmed == "" {
+		return nil
+	}
+	if strings.HasPrefix(strings.ToLower(trimmed), "r=") {
+		return []string{trimmed}
+	}
+	cur := []string{trimmed}
+	for step := 0; step < 8; step++ {
+		changed := false
+		next := make([]string, 0, len(cur))
+		for _, item := range cur {
+			start, end, closeChar := findFirstShorthandGroup(item)
+			if start < 0 {
+				next = append(next, item)
+				continue
+			}
+			_ = closeChar
+			inner := item[start+1 : end]
+			variants := expandShorthandSegment(inner)
+			if len(variants) == 0 {
+				next = append(next, item)
+				continue
+			}
+			changed = true
+			prefix := item[:start]
+			suffix := item[end+1:]
+			for _, v := range variants {
+				next = append(next, prefix+v+suffix)
+				if len(next) >= maxShorthandExpansions {
+					break
+				}
+			}
+			if len(next) >= maxShorthandExpansions {
+				break
+			}
+		}
+		cur = next
+		if !changed || len(cur) >= maxShorthandExpansions {
+			break
+		}
+	}
+	return cur
+}
+
+func findFirstShorthandGroup(s string) (int, int, byte) {
+	for i := 0; i < len(s); i++ {
+		var want byte
+		switch s[i] {
+		case '{':
+			want = '}'
+		case '(':
+			want = ')'
+		default:
+			continue
+		}
+		for j := i + 1; j < len(s); j++ {
+			if s[j] == want {
+				return i, j, want
+			}
+		}
+	}
+	return -1, -1, 0
+}
+
+func expandShorthandSegment(inner string) []string {
+	sep := ","
+	if strings.Contains(inner, "|") {
+		sep = "|"
+	} else if !strings.Contains(inner, ",") {
+		if parts := strings.SplitN(inner, "-", 2); len(parts) == 2 {
+			a, errA := strconv.Atoi(strings.TrimSpace(parts[0]))
+			b, errB := strconv.Atoi(strings.TrimSpace(parts[1]))
+			if errA == nil && errB == nil && a >= 0 && b >= 0 {
+				step := 1
+				if b < a {
+					step = -1
+				}
+				var out []string
+				for v := a; ; v += step {
+					out = append(out, strconv.Itoa(v))
+					if v == b || len(out) >= maxShorthandExpansions {
+						break
+					}
+				}
+				return out
+			}
+		}
+	}
+	rawParts := strings.Split(inner, sep)
+	if len(rawParts) <= 1 {
+		return nil
+	}
+	out := make([]string, 0, len(rawParts))
+	for _, p := range rawParts {
+		out = append(out, strings.TrimSpace(p))
+	}
+	return out
+}
+
+// EvaluateNodeMatch checks if nodeKey matches targetPerm and returns
+// (matched, isExact, specificityScore). Supports literal nodes, "*", sub-wildcards ("gate.*"),
+// LuckPerms shorthand ("{a,b}", "(a|b)", "{1-20}"), and regex ("r=...").
+func EvaluateNodeMatch(nodeKey, targetPerm string) (bool, bool, int) {
+	k := strings.TrimSpace(nodeKey)
+	t := strings.ToLower(strings.TrimSpace(targetPerm))
+	if k == "" || t == "" {
+		return false, false, 0
+	}
+
+	lk := strings.ToLower(k)
+	if strings.HasPrefix(lk, "r=") {
+		pat := strings.TrimSpace(k[2:])
+		if pat == "" {
+			return false, false, 0
+		}
+		re, err := regexp.Compile("(?i)^(?:" + pat + ")$")
+		if err != nil || !re.MatchString(t) {
+			return false, false, 0
+		}
+		return true, false, len(pat)
+	}
+
+	if !strings.ContainsAny(lk, "{(") {
+		if lk == t {
+			return true, true, len(t) + 1
+		}
+		if lk == "*" {
+			return true, false, 1
+		}
+		if strings.HasSuffix(lk, ".*") {
+			prefix := lk[:len(lk)-1]
+			if strings.HasPrefix(t, prefix) {
+				return true, false, len(prefix)
+			}
+		}
+		return false, false, 0
+	}
+
+	expanded := ExpandShorthand(lk)
+	matched := false
+	isExact := false
+	bestScore := 0
+	for _, cand := range expanded {
+		if cand == t {
+			return true, true, len(t)
+		}
+		if cand == "*" && 1 > bestScore {
+			matched = true
+			bestScore = 1
+		} else if strings.HasSuffix(cand, ".*") {
+			prefix := cand[:len(cand)-1]
+			if strings.HasPrefix(t, prefix) && len(prefix) > bestScore {
+				matched = true
+				bestScore = len(prefix)
+			}
+		}
+	}
+	return matched, isExact, bestScore
+}
+
 // MatchesPermission evaluates if this node's key matches the target permission query.
-// Supports exact matches and wildcard patterns (e.g. "*", "gate.*", "stonyperms.admin.*").
+// Supports exact matches, wildcards, shorthand "{a,b}"/"(a|b)"/"{1-N}", and "r=" regex patterns.
 func (n Node) MatchesPermission(targetPerm string) bool {
-	key := strings.ToLower(n.Key)
-	target := strings.ToLower(targetPerm)
-
-	// Exact match
-	if key == target {
-		return true
-	}
-
-	// Root universal wildcard
-	if key == "*" {
-		return true
-	}
-
-	// Sub-tree wildcard (e.g. "gate.*" matches "gate.command.server")
-	if strings.HasSuffix(key, ".*") {
-		prefix := key[:len(key)-1] // keep the dot "gate."
-		return strings.HasPrefix(target, prefix)
-	}
-
-	return false
+	matched, _, _ := EvaluateNodeMatch(n.Key, targetPerm)
+	return matched
 }
 
 // PriorityMeta represents prefix, suffix, or weighted metadata.

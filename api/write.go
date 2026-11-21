@@ -51,15 +51,27 @@ func (e *apiError) Error() string {
 
 type mutableTarget interface {
 	AddNode(model.Node)
+	AddNodeWithModifier(model.Node, model.TempModifier, time.Time) (model.Node, error)
 	RemoveNode(key string, contexts map[string]string) bool
+	RemoveTempNode(key string, contexts map[string]string) bool
 	SetMeta(key, value string)
+	SetMetaEntry(model.MetaEntry, model.TempModifier, time.Time) (model.MetaEntry, error)
 	UnsetMeta(key string) bool
+	UnsetMetaEntry(key string, contexts map[string]string, tempOnly bool) bool
 	AddPrefix(model.PriorityMeta)
+	AddPrefixWithModifier(model.PriorityMeta, model.TempModifier, time.Time) (model.PriorityMeta, error)
+	SetPrefixInContext(model.PriorityMeta)
 	RemovePrefix(priority int) bool
+	RemovePrefixMatch(priority int, value string, contexts map[string]string, tempOnly bool) bool
 	AddSuffix(model.PriorityMeta)
+	AddSuffixWithModifier(model.PriorityMeta, model.TempModifier, time.Time) (model.PriorityMeta, error)
+	SetSuffixInContext(model.PriorityMeta)
 	RemoveSuffix(priority int) bool
+	RemoveSuffixMatch(priority int, value string, contexts map[string]string, tempOnly bool) bool
 	AddParent(model.Inheritance)
+	AddParentWithModifier(model.Inheritance, model.TempModifier, time.Time) (model.Inheritance, error)
 	RemoveParent(groupName string, contexts map[string]string) bool
+	RemoveTempParent(groupName string, contexts map[string]string) bool
 }
 
 // -----------------------------------------------------------------------------
@@ -237,6 +249,8 @@ func (s *Server) writeAPIError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "prefix_not_found", "prefix priority does not exist")
 	case errors.Is(err, errSuffixNotFound):
 		writeError(w, http.StatusNotFound, "suffix_not_found", "suffix priority does not exist")
+	case errors.Is(err, model.ErrTempEntryExists):
+		writeError(w, http.StatusConflict, "temp_entry_exists", err.Error())
 	case errors.Is(err, manager.ErrTrackEmpty),
 		errors.Is(err, manager.ErrTrackTop),
 		errors.Is(err, manager.ErrTrackBottom),
@@ -252,9 +266,22 @@ func (s *Server) writeAPIError(w http.ResponseWriter, err error) {
 // Shared User / Group Mutation Helpers
 // -----------------------------------------------------------------------------
 
+func parseAPITempModifier(raw string) (model.TempModifier, *apiError) {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if trimmed == "" {
+		return model.TempModifierReplace, nil
+	}
+	mod, ok := model.ParseTempModifier(trimmed)
+	if !ok {
+		return "", &apiError{http.StatusBadRequest, "invalid_modifier", "modifier must be accumulate, replace, or deny"}
+	}
+	return mod, nil
+}
+
 type parsedParentOp struct {
 	group           string
 	mode            string
+	modifier        model.TempModifier
 	durationSeconds int64
 	expiry          int64
 	contexts        map[string]string
@@ -270,10 +297,21 @@ func (s *Server) parseParentRequest(req setParentRequest) (parsedParentOp, *apiE
 	if mode == "" {
 		mode = "add"
 	}
+	mod := model.TempModifierReplace
 	switch mode {
-	case "add", "set", "accumulate":
+	case "add", "set":
+		if req.Modifier != "" {
+			parsedMod, modErr := parseAPITempModifier(req.Modifier)
+			if modErr != nil {
+				return parsedParentOp{}, modErr
+			}
+			mod = parsedMod
+		}
+	case "accumulate", "replace", "deny":
+		parsedMod, _ := model.ParseTempModifier(mode)
+		mod = parsedMod
 	default:
-		return parsedParentOp{}, &apiError{http.StatusBadRequest, "invalid_mode", "mode must be add, set, or accumulate"}
+		return parsedParentOp{}, &apiError{http.StatusBadRequest, "invalid_mode", "mode must be add, set, accumulate, replace, or deny"}
 	}
 	if err := validateContexts(req.Contexts); err != nil {
 		return parsedParentOp{}, &apiError{http.StatusBadRequest, "invalid_context", err.Error()}
@@ -282,12 +320,13 @@ func (s *Server) parseParentRequest(req setParentRequest) (parsedParentOp, *apiE
 	if apiErr != nil {
 		return parsedParentOp{}, apiErr
 	}
-	if mode == "accumulate" && req.Expiry > 0 {
+	if (mode == "accumulate" || mod == model.TempModifierAccumulate) && req.Expiry > 0 {
 		return parsedParentOp{}, &apiError{http.StatusBadRequest, "invalid_expiry", "accumulate mode requires durationSeconds rather than explicit expiry"}
 	}
 	return parsedParentOp{
 		group:           group,
 		mode:            mode,
+		modifier:        mod,
 		durationSeconds: req.DurationSeconds,
 		expiry:          exp,
 		contexts:        copyContexts(req.Contexts),
@@ -301,9 +340,8 @@ func applyParentOp(
 	primaryGroup *string,
 	op parsedParentOp,
 	now time.Time,
-) string {
-	switch op.mode {
-	case "set":
+) (string, error) {
+	if op.mode == "set" {
 		*parents = []model.Inheritance{{
 			Group:    op.group,
 			Expiry:   op.expiry,
@@ -312,45 +350,24 @@ func applyParentOp(
 		if primaryGroup != nil {
 			*primaryGroup = op.group
 		}
-		return fmt.Sprintf("Set parent group to '%s'", op.group)
-
-	case "accumulate":
-		targetExpiry := int64(0)
-		if op.durationSeconds > 0 {
-			nowUnix := now.Unix()
-			targetExpiry = nowUnix + op.durationSeconds
-			for _, existing := range *parents {
-				if strings.EqualFold(existing.Group, op.group) && model.SameContexts(existing.Contexts, op.contexts) {
-					if existing.Expiry == 0 {
-						targetExpiry = 0
-					} else if existing.Expiry > nowUnix {
-						targetExpiry = existing.Expiry + op.durationSeconds
-					}
-					break
-				}
-			}
-		}
-		target.AddParent(model.Inheritance{
-			Group:    op.group,
-			Expiry:   targetExpiry,
-			Contexts: copyContexts(op.contexts),
-		})
-		if primaryGroup != nil && op.setPrimary {
-			*primaryGroup = op.group
-		}
-		return fmt.Sprintf("Accumulated parent group '%s' (+%ds)", op.group, op.durationSeconds)
-
-	default:
-		target.AddParent(model.Inheritance{
-			Group:    op.group,
-			Expiry:   op.expiry,
-			Contexts: copyContexts(op.contexts),
-		})
-		if primaryGroup != nil && op.setPrimary {
-			*primaryGroup = op.group
-		}
-		return fmt.Sprintf("Added parent group '%s'", op.group)
+		return fmt.Sprintf("Set parent group to '%s'", op.group), nil
 	}
+
+	inh := model.Inheritance{
+		Group:    op.group,
+		Expiry:   op.expiry,
+		Contexts: copyContexts(op.contexts),
+	}
+	if _, err := target.AddParentWithModifier(inh, op.modifier, now); err != nil {
+		return "", err
+	}
+	if primaryGroup != nil && op.setPrimary {
+		*primaryGroup = op.group
+	}
+	if op.modifier == model.TempModifierAccumulate {
+		return fmt.Sprintf("Accumulated parent group '%s' (+%ds)", op.group, op.durationSeconds), nil
+	}
+	return fmt.Sprintf("Added parent group '%s'", op.group), nil
 }
 
 func parsePermissionInput(rawKey string, valPtr *bool, durationSeconds, expiry int64, contexts map[string]string, now time.Time) (model.Node, *apiError) {
@@ -396,33 +413,38 @@ func parseAffixInput(req setAffixRequest, now time.Time) (model.PriorityMeta, *a
 	}, nil
 }
 
-func parseDeleteNodeArgs(w http.ResponseWriter, r *http.Request) (string, map[string]string, *apiError) {
+func parseDeleteNodeArgs(w http.ResponseWriter, r *http.Request) (string, map[string]string, bool, *apiError) {
 	var req deletePermissionRequest
 	hasBody, apiErr := decodeOptionalStrictJSON(w, r, &req)
 	if apiErr != nil {
-		return "", nil, apiErr
+		return "", nil, false, apiErr
 	}
 
 	rawKey := req.Key
 	rawCtx := req.Contexts
+	tempOnly := req.TempOnly
 	if !hasBody {
 		q := r.URL.Query()
 		rawKey = q.Get("key")
 		q.Del("key")
+		if strings.EqualFold(strings.TrimSpace(q.Get("tempOnly")), "true") {
+			tempOnly = true
+		}
+		q.Del("tempOnly")
 		var err error
 		rawCtx, err = parseContexts(q)
 		if err != nil {
-			return "", nil, &apiError{http.StatusBadRequest, "invalid_context", err.Error()}
+			return "", nil, false, &apiError{http.StatusBadRequest, "invalid_context", err.Error()}
 		}
 	} else if err := validateContexts(rawCtx); err != nil {
-		return "", nil, &apiError{http.StatusBadRequest, "invalid_context", err.Error()}
+		return "", nil, false, &apiError{http.StatusBadRequest, "invalid_context", err.Error()}
 	}
 
 	key, ok := validatePermissionKey(rawKey)
 	if !ok {
-		return "", nil, &apiError{http.StatusBadRequest, "invalid_permission", "permission key must be 1-256 non-whitespace printable ASCII characters"}
+		return "", nil, false, &apiError{http.StatusBadRequest, "invalid_permission", "permission key must be 1-256 non-whitespace printable ASCII characters"}
 	}
-	return key, copyContexts(rawCtx), nil
+	return key, copyContexts(rawCtx), tempOnly, nil
 }
 
 func (s *Server) mutateSubject(
@@ -595,7 +617,10 @@ func (s *Server) handleUserAddParent(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	u, rev, err := s.mgr.MutateUser(uid, "", createIfMissing, s.opts.DefaultGroup, actor, func(u *model.User) (bool, string, error) {
-		audit := applyParentOp(&u.Parents, u, &u.PrimaryGroup, op, now)
+		audit, opErr := applyParentOp(&u.Parents, u, &u.PrimaryGroup, op, now)
+		if opErr != nil {
+			return false, "", opErr
+		}
 		return true, audit, nil
 	})
 	if err != nil {
@@ -629,17 +654,26 @@ func (s *Server) handleUserRemoveParent(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_group", "group name must match ^[a-z0-9_+-]{1,64}$")
 		return
 	}
-	contexts, err := parseContexts(r.URL.Query())
+	q := r.URL.Query()
+	tempOnly := strings.EqualFold(strings.TrimSpace(q.Get("tempOnly")), "true")
+	q.Del("tempOnly")
+	contexts, err := parseContexts(q)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
 		return
 	}
 
 	u, rev, err := s.mgr.MutateUser(uid, "", false, s.opts.DefaultGroup, actor, func(u *model.User) (bool, string, error) {
-		if !u.RemoveParent(groupName, contexts) {
+		var removed bool
+		if tempOnly {
+			removed = u.RemoveTempParent(groupName, contexts)
+		} else {
+			removed = u.RemoveParent(groupName, contexts)
+		}
+		if !removed {
 			return false, "", errParentNotFound
 		}
-		if strings.EqualFold(u.PrimaryGroup, groupName) {
+		if !tempOnly && strings.EqualFold(u.PrimaryGroup, groupName) {
 			u.PrimaryGroup = s.opts.DefaultGroup
 		}
 		return true, fmt.Sprintf("Removed parent group '%s'", groupName), nil
@@ -674,8 +708,19 @@ func (s *Server) handleUserPrimaryGroup(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	now := time.Now()
 	u, rev, err := s.mgr.MutateUser(uid, "", createIfMissing, s.opts.DefaultGroup, actor, func(u *model.User) (bool, string, error) {
-		if strings.EqualFold(u.PrimaryGroup, group) {
+		hasGlobalParent := false
+		for _, p := range u.Parents {
+			if strings.EqualFold(p.Group, group) && len(p.Contexts) == 0 && !p.IsExpired(now) {
+				hasGlobalParent = true
+				break
+			}
+		}
+		if !hasGlobalParent {
+			u.AddParent(model.NewInheritance(group))
+		}
+		if strings.EqualFold(u.PrimaryGroup, group) && hasGlobalParent {
 			return false, "", nil
 		}
 		u.PrimaryGroup = group
@@ -701,7 +746,13 @@ func (s *Server) handleSubjectSetPermission(isUser bool) http.HandlerFunc {
 			s.writeAPIError(w, apiErr)
 			return
 		}
-		node, apiErr := parsePermissionInput(req.Key, req.Value, req.DurationSeconds, req.Expiry, req.Contexts, time.Now())
+		mod, apiErr := parseAPITempModifier(req.Modifier)
+		if apiErr != nil {
+			s.writeAPIError(w, apiErr)
+			return
+		}
+		now := time.Now()
+		node, apiErr := parsePermissionInput(req.Key, req.Value, req.DurationSeconds, req.Expiry, req.Contexts, now)
 		if apiErr != nil {
 			s.writeAPIError(w, apiErr)
 			return
@@ -711,8 +762,10 @@ func (s *Server) handleSubjectSetPermission(isUser bool) http.HandlerFunc {
 			subject = r.PathValue("name")
 		}
 		s.mutateSubject(w, isUser, subject, actor, func(target mutableTarget) (bool, string, error) {
-			target.AddNode(node)
-			return true, fmt.Sprintf("Set permission '%s' to %v", node.Key, node.Value), nil
+			if _, err := target.AddNodeWithModifier(node, mod, now); err != nil {
+				return false, "", err
+			}
+			return true, fmt.Sprintf("Set permission '%s' to %v (modifier=%s)", node.Key, node.Value, mod), nil
 		})
 	}
 }
@@ -724,7 +777,7 @@ func (s *Server) handleSubjectDeletePermission(isUser bool) http.HandlerFunc {
 			s.writeAPIError(w, apiErr)
 			return
 		}
-		key, contexts, apiErr := parseDeleteNodeArgs(w, r)
+		key, contexts, tempOnly, apiErr := parseDeleteNodeArgs(w, r)
 		if apiErr != nil {
 			s.writeAPIError(w, apiErr)
 			return
@@ -734,7 +787,13 @@ func (s *Server) handleSubjectDeletePermission(isUser bool) http.HandlerFunc {
 			subject = r.PathValue("name")
 		}
 		s.mutateSubject(w, isUser, subject, actor, func(target mutableTarget) (bool, string, error) {
-			if !target.RemoveNode(key, contexts) {
+			var removed bool
+			if tempOnly {
+				removed = target.RemoveTempNode(key, contexts)
+			} else {
+				removed = target.RemoveNode(key, contexts)
+			}
+			if !removed {
 				return false, "", errNodeNotFound
 			}
 			return true, fmt.Sprintf("Unset permission '%s'", key), nil
@@ -763,12 +822,35 @@ func (s *Server) handleSubjectSetMeta(isUser bool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_meta_value", "meta value must be at most 1024 bytes without control characters")
 			return
 		}
+		if err := validateContexts(req.Contexts); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
+			return
+		}
+		mod, apiErr := parseAPITempModifier(req.Modifier)
+		if apiErr != nil {
+			s.writeAPIError(w, apiErr)
+			return
+		}
+		now := time.Now()
+		exp, apiErr := resolveExpiry(req.DurationSeconds, req.Expiry, now)
+		if apiErr != nil {
+			s.writeAPIError(w, apiErr)
+			return
+		}
 		subject := r.PathValue("id")
 		if !isUser {
 			subject = r.PathValue("name")
 		}
 		s.mutateSubject(w, isUser, subject, actor, func(target mutableTarget) (bool, string, error) {
-			target.SetMeta(key, req.Value)
+			_, err := target.SetMetaEntry(model.MetaEntry{
+				Key:      key,
+				Value:    req.Value,
+				Expiry:   exp,
+				Contexts: copyContexts(req.Contexts),
+			}, mod, now)
+			if err != nil {
+				return false, "", err
+			}
 			return true, fmt.Sprintf("Set meta '%s'", key), nil
 		})
 	}
@@ -786,12 +868,36 @@ func (s *Server) handleSubjectDeleteMeta(isUser bool) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_meta_key", "meta key must match ^[a-zA-Z0-9._:-]{1,64}$")
 			return
 		}
+		var req deleteMetaRequest
+		hasBody, apiErr := decodeOptionalStrictJSON(w, r, &req)
+		if apiErr != nil {
+			s.writeAPIError(w, apiErr)
+			return
+		}
+		contexts := req.Contexts
+		tempOnly := req.TempOnly
+		if !hasBody {
+			q := r.URL.Query()
+			if strings.EqualFold(strings.TrimSpace(q.Get("tempOnly")), "true") {
+				tempOnly = true
+			}
+			q.Del("tempOnly")
+			var err error
+			contexts, err = parseContexts(q)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
+				return
+			}
+		} else if err := validateContexts(contexts); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
+			return
+		}
 		subject := r.PathValue("id")
 		if !isUser {
 			subject = r.PathValue("name")
 		}
 		s.mutateSubject(w, isUser, subject, actor, func(target mutableTarget) (bool, string, error) {
-			if !target.UnsetMeta(key) {
+			if !target.UnsetMetaEntry(key, contexts, tempOnly) {
 				return false, "", errMetaNotFound
 			}
 			return true, fmt.Sprintf("Unset meta '%s'", key), nil
@@ -811,7 +917,18 @@ func (s *Server) handleSubjectSetAffix(isUser, isPrefix bool) http.HandlerFunc {
 			s.writeAPIError(w, apiErr)
 			return
 		}
-		pm, apiErr := parseAffixInput(req, time.Now())
+		mode := strings.ToLower(strings.TrimSpace(req.Mode))
+		if mode != "" && mode != "add" && mode != "set" {
+			writeError(w, http.StatusBadRequest, "invalid_mode", "mode must be add or set")
+			return
+		}
+		mod, apiErr := parseAPITempModifier(req.Modifier)
+		if apiErr != nil {
+			s.writeAPIError(w, apiErr)
+			return
+		}
+		now := time.Now()
+		pm, apiErr := parseAffixInput(req, now)
 		if apiErr != nil {
 			s.writeAPIError(w, apiErr)
 			return
@@ -822,10 +939,18 @@ func (s *Server) handleSubjectSetAffix(isUser, isPrefix bool) http.HandlerFunc {
 		}
 		s.mutateSubject(w, isUser, subject, actor, func(target mutableTarget) (bool, string, error) {
 			if isPrefix {
-				target.AddPrefix(pm)
+				if mode == "set" {
+					target.SetPrefixInContext(pm)
+				} else if _, err := target.AddPrefixWithModifier(pm, mod, now); err != nil {
+					return false, "", err
+				}
 				return true, fmt.Sprintf("Set prefix (priority %d)", pm.Priority), nil
 			}
-			target.AddSuffix(pm)
+			if mode == "set" {
+				target.SetSuffixInContext(pm)
+			} else if _, err := target.AddSuffixWithModifier(pm, mod, now); err != nil {
+				return false, "", err
+			}
 			return true, fmt.Sprintf("Set suffix (priority %d)", pm.Priority), nil
 		})
 	}
@@ -838,6 +963,13 @@ func (s *Server) handleSubjectDeleteAffix(isUser, isPrefix bool) http.HandlerFun
 			s.writeAPIError(w, apiErr)
 			return
 		}
+		var req deleteAffixRequest
+		hasBody, apiErr := decodeOptionalStrictJSON(w, r, &req)
+		if apiErr != nil {
+			s.writeAPIError(w, apiErr)
+			return
+		}
+		q := r.URL.Query()
 		priorityStr := strings.TrimSpace(r.PathValue("priority"))
 		var priority int
 		if priorityStr != "" {
@@ -847,26 +979,42 @@ func (s *Server) handleSubjectDeleteAffix(isUser, isPrefix bool) http.HandlerFun
 				return
 			}
 			priority = parsed
+		} else if hasBody && req.Priority != nil {
+			priority = *req.Priority
+		} else if qp := strings.TrimSpace(q.Get("priority")); qp != "" {
+			parsed, err := strconv.Atoi(qp)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_priority", "priority must be an integer")
+				return
+			}
+			priority = parsed
 		} else {
-			var req deleteAffixRequest
-			hasBody, apiErr := decodeOptionalStrictJSON(w, r, &req)
-			if apiErr != nil {
-				s.writeAPIError(w, apiErr)
+			writeError(w, http.StatusBadRequest, "invalid_priority", "priority is required")
+			return
+		}
+
+		value := req.Value
+		contexts := req.Contexts
+		tempOnly := req.TempOnly
+		if !hasBody {
+			if qv := q.Get("value"); qv != "" {
+				value = qv
+			}
+			if strings.EqualFold(strings.TrimSpace(q.Get("tempOnly")), "true") {
+				tempOnly = true
+			}
+			q.Del("priority")
+			q.Del("value")
+			q.Del("tempOnly")
+			var err error
+			contexts, err = parseContexts(q)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
 				return
 			}
-			if hasBody && req.Priority != nil {
-				priority = *req.Priority
-			} else if q := strings.TrimSpace(r.URL.Query().Get("priority")); q != "" {
-				parsed, err := strconv.Atoi(q)
-				if err != nil {
-					writeError(w, http.StatusBadRequest, "invalid_priority", "priority must be an integer")
-					return
-				}
-				priority = parsed
-			} else {
-				writeError(w, http.StatusBadRequest, "invalid_priority", "priority is required")
-				return
-			}
+		} else if err := validateContexts(contexts); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
+			return
 		}
 
 		subject := r.PathValue("id")
@@ -875,12 +1023,12 @@ func (s *Server) handleSubjectDeleteAffix(isUser, isPrefix bool) http.HandlerFun
 		}
 		s.mutateSubject(w, isUser, subject, actor, func(target mutableTarget) (bool, string, error) {
 			if isPrefix {
-				if !target.RemovePrefix(priority) {
+				if !target.RemovePrefixMatch(priority, value, contexts, tempOnly) {
 					return false, "", errPrefixNotFound
 				}
 				return true, fmt.Sprintf("Removed prefix (priority %d)", priority), nil
 			}
-			if !target.RemoveSuffix(priority) {
+			if !target.RemoveSuffixMatch(priority, value, contexts, tempOnly) {
 				return false, "", errSuffixNotFound
 			}
 			return true, fmt.Sprintf("Removed suffix (priority %d)", priority), nil
@@ -1152,7 +1300,7 @@ func (s *Server) prepareBatchOp(raw batchUserOperation, now time.Time) (prepared
 func (s *Server) applyPreparedBatchOp(u *model.User, p preparedBatchOp, now time.Time) bool {
 	switch p.op {
 	case "parent_add", "parent_set", "parent_accumulate":
-		applyParentOp(&u.Parents, u, &u.PrimaryGroup, p.parentOp, now)
+		_, _ = applyParentOp(&u.Parents, u, &u.PrimaryGroup, p.parentOp, now)
 		return true
 	case "parent_remove":
 		removed := u.RemoveParent(p.group, p.contexts)
@@ -1377,7 +1525,10 @@ func (s *Server) handleGroupAddParent(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	g, rev, err := s.mgr.MutateGroup(groupName, actor, func(g *model.Group) (bool, string, error) {
-		audit := applyParentOp(&g.Parents, g, nil, op, now)
+		audit, opErr := applyParentOp(&g.Parents, g, nil, op, now)
+		if opErr != nil {
+			return false, "", opErr
+		}
 		return true, audit, nil
 	})
 	if err != nil {
@@ -1398,9 +1549,15 @@ func (s *Server) handleGroupRemoveParent(w http.ResponseWriter, r *http.Request)
 
 	rawParent := strings.TrimSpace(r.PathValue("parent"))
 	var contexts map[string]string
+	tempOnly := false
 	if rawParent != "" {
+		q := r.URL.Query()
+		if strings.EqualFold(strings.TrimSpace(q.Get("tempOnly")), "true") {
+			tempOnly = true
+		}
+		q.Del("tempOnly")
 		var err error
-		contexts, err = parseContexts(r.URL.Query())
+		contexts, err = parseContexts(q)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
 			return
@@ -1414,6 +1571,7 @@ func (s *Server) handleGroupRemoveParent(w http.ResponseWriter, r *http.Request)
 		}
 		if hasBody {
 			rawParent = req.Group
+			tempOnly = req.TempOnly
 			if err := validateContexts(req.Contexts); err != nil {
 				writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
 				return
@@ -1422,7 +1580,11 @@ func (s *Server) handleGroupRemoveParent(w http.ResponseWriter, r *http.Request)
 		} else {
 			q := r.URL.Query()
 			rawParent = q.Get("group")
+			if strings.EqualFold(strings.TrimSpace(q.Get("tempOnly")), "true") {
+				tempOnly = true
+			}
 			q.Del("group")
+			q.Del("tempOnly")
 			var err error
 			contexts, err = parseContexts(q)
 			if err != nil {
@@ -1439,7 +1601,13 @@ func (s *Server) handleGroupRemoveParent(w http.ResponseWriter, r *http.Request)
 	}
 
 	g, rev, err := s.mgr.MutateGroup(groupName, actor, func(g *model.Group) (bool, string, error) {
-		if !g.RemoveParent(parentName, contexts) {
+		var removed bool
+		if tempOnly {
+			removed = g.RemoveTempParent(parentName, contexts)
+		} else {
+			removed = g.RemoveParent(parentName, contexts)
+		}
+		if !removed {
 			return false, "", errParentNotFound
 		}
 		return true, fmt.Sprintf("Removed parent group '%s'", parentName), nil
@@ -1580,4 +1748,192 @@ func (s *Server) handleReload(w http.ResponseWriter, r *http.Request) {
 	rev := s.mgr.Revision()
 	w.Header().Set("X-StonyPerms-Revision", fmt.Sprintf("%d", rev))
 	writeJSON(w, http.StatusOK, reloadResponse{Revision: rev, Reloaded: true})
+}
+
+func (s *Server) handleBulkUpdate(w http.ResponseWriter, r *http.Request) {
+	actor, apiErr := parseActorHeader(r)
+	if apiErr != nil {
+		s.writeAPIError(w, apiErr)
+		return
+	}
+	var req bulkUpdateRequest
+	if apiErr := decodeStrictJSON(w, r, &req); apiErr != nil {
+		s.writeAPIError(w, apiErr)
+		return
+	}
+	constraints := make([]manager.BulkConstraint, 0, len(req.Constraints))
+	for _, c := range req.Constraints {
+		constraints = append(constraints, manager.BulkConstraint{
+			Field:    c.Field,
+			Operator: c.Operator,
+			Pattern:  c.Pattern,
+		})
+	}
+	opts := manager.BulkUpdateOptions{
+		Scope:       req.Scope,
+		Action:      req.Action,
+		Field:       req.Field,
+		Value:       req.Value,
+		Constraints: constraints,
+	}
+	var (
+		summary manager.BulkUpdateSummary
+		err     error
+	)
+	if req.DryRun {
+		summary, err = s.mgr.PreviewBulkUpdate(opts)
+	} else {
+		summary, err = s.mgr.BulkUpdate(opts, actor)
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_bulk_update", err.Error())
+		return
+	}
+	w.Header().Set("X-StonyPerms-Revision", fmt.Sprintf("%d", summary.Revision))
+	writeJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) parseTrackSetPayload(w http.ResponseWriter, r *http.Request) (string, string, map[string]string, bool) {
+	trackName := strings.ToLower(strings.TrimSpace(r.PathValue("track")))
+	tr := s.mgr.GetTrack(trackName)
+	if tr == nil {
+		writeError(w, http.StatusNotFound, "track_not_found", "track does not exist")
+		return "", "", nil, false
+	}
+	var req trackSetRequest
+	if apiErr := decodeStrictJSON(w, r, &req); apiErr != nil {
+		s.writeAPIError(w, apiErr)
+		return "", "", nil, false
+	}
+	targetGroup, apiErr := s.requireGroupExists(req.Group)
+	if apiErr != nil {
+		s.writeAPIError(w, apiErr)
+		return "", "", nil, false
+	}
+	if _, ok := tr.IndexOf(targetGroup); !ok {
+		writeError(w, http.StatusConflict, "track_conflict", fmt.Sprintf("group %q is not part of track %q", targetGroup, tr.Name))
+		return "", "", nil, false
+	}
+	if err := validateContexts(req.Contexts); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
+		return "", "", nil, false
+	}
+	return tr.Name, targetGroup, copyContexts(req.Contexts), true
+}
+
+func (s *Server) handleUserTrackSet(w http.ResponseWriter, r *http.Request) {
+	actor, apiErr := parseActorHeader(r)
+	if apiErr != nil {
+		s.writeAPIError(w, apiErr)
+		return
+	}
+	uid, createIfMissing, apiErr := s.resolveWriteUser(r.PathValue("id"))
+	if apiErr != nil {
+		s.writeAPIError(w, apiErr)
+		return
+	}
+	trackName, targetGroup, contexts, ok := s.parseTrackSetPayload(w, r)
+	if !ok {
+		return
+	}
+	if createIfMissing {
+		if _, found, _ := s.mgr.UserSnapshot(uid); !found {
+			_ = s.mgr.GetOrCreateUser(uid, "")
+		}
+	}
+	u, err := s.mgr.SetUserTrackGroup(uid, trackName, targetGroup, contexts, actor)
+	if err != nil {
+		s.writeAPIError(w, err)
+		return
+	}
+	rev := s.mgr.Revision()
+	w.Header().Set("X-StonyPerms-Revision", fmt.Sprintf("%d", rev))
+	writeJSON(w, http.StatusOK, userRecordResponse{Revision: rev, User: u})
+}
+
+func (s *Server) handleUserTrackClear(w http.ResponseWriter, r *http.Request) {
+	actor, apiErr := parseActorHeader(r)
+	if apiErr != nil {
+		s.writeAPIError(w, apiErr)
+		return
+	}
+	uid, createIfMissing, apiErr := s.resolveWriteUser(r.PathValue("id"))
+	if apiErr != nil {
+		s.writeAPIError(w, apiErr)
+		return
+	}
+	if createIfMissing {
+		if _, found, _ := s.mgr.UserSnapshot(uid); !found {
+			writeError(w, http.StatusNotFound, "user_not_found", "user does not exist")
+			return
+		}
+	}
+	contexts, err := parseContexts(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
+		return
+	}
+	u, removed, err := s.mgr.ClearUserTrack(uid, strings.ToLower(strings.TrimSpace(r.PathValue("track"))), contexts, actor)
+	if err != nil {
+		s.writeAPIError(w, err)
+		return
+	}
+	rev := s.mgr.Revision()
+	w.Header().Set("X-StonyPerms-Revision", fmt.Sprintf("%d", rev))
+	writeJSON(w, http.StatusOK, userTrackClearResponse{Revision: rev, Removed: removed, User: u})
+}
+
+func (s *Server) handleGroupTrackSet(w http.ResponseWriter, r *http.Request) {
+	actor, apiErr := parseActorHeader(r)
+	if apiErr != nil {
+		s.writeAPIError(w, apiErr)
+		return
+	}
+	groupName := strings.ToLower(strings.TrimSpace(r.PathValue("name")))
+	if s.mgr.GetGroup(groupName) == nil {
+		writeError(w, http.StatusNotFound, "group_not_found", "group does not exist")
+		return
+	}
+	trackName, targetGroup, contexts, ok := s.parseTrackSetPayload(w, r)
+	if !ok {
+		return
+	}
+	if targetGroup == groupName {
+		writeError(w, http.StatusBadRequest, "invalid_parent", "a group cannot inherit from itself")
+		return
+	}
+	g, err := s.mgr.SetGroupTrackParent(groupName, trackName, targetGroup, contexts, actor)
+	if err != nil {
+		s.writeAPIError(w, err)
+		return
+	}
+	rev := s.mgr.Revision()
+	w.Header().Set("X-StonyPerms-Revision", fmt.Sprintf("%d", rev))
+	writeJSON(w, http.StatusOK, groupResponse{Revision: rev, Group: g})
+}
+
+func (s *Server) handleGroupTrackClear(w http.ResponseWriter, r *http.Request) {
+	actor, apiErr := parseActorHeader(r)
+	if apiErr != nil {
+		s.writeAPIError(w, apiErr)
+		return
+	}
+	groupName := strings.ToLower(strings.TrimSpace(r.PathValue("name")))
+	if s.mgr.GetGroup(groupName) == nil {
+		writeError(w, http.StatusNotFound, "group_not_found", "group does not exist")
+		return
+	}
+	contexts, err := parseContexts(r.URL.Query())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_context", err.Error())
+		return
+	}
+	g, removed, err := s.mgr.ClearGroupTrack(groupName, strings.ToLower(strings.TrimSpace(r.PathValue("track"))), contexts, actor)
+	if err != nil {
+		s.writeAPIError(w, err)
+		return
+	}
+	rev := s.mgr.Revision()
+	w.Header().Set("X-StonyPerms-Revision", fmt.Sprintf("%d", rev))
+	writeJSON(w, http.StatusOK, groupTrackClearResponse{Revision: rev, Removed: removed, Group: g})
 }

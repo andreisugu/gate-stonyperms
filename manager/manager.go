@@ -1131,10 +1131,7 @@ func (m *Manager) effectiveUserLocked(id uuid.UUID, contexts map[string]string, 
 	}
 
 	resolved := m.engine.ResolveInheritedGroups(user, m.groups, contexts, now)
-	primaryGroup := user.PrimaryGroup
-	if primaryGroup == "" {
-		primaryGroup = defaultGroup
-	}
+	primaryGroup := m.engine.ResolvePrimaryGroup(user, m.groups, contexts, defaultGroup)
 
 	eff := &EffectiveUser{
 		UUID:         id,

@@ -63,3 +63,25 @@ func TestTempModifiersAndMetaEntries(t *testing.T) {
 		t.Fatalf("expected 2 expired items cleaned (node + metaEntry), got %d", cleaned)
 	}
 }
+
+func TestShorthandAndRegexMatching(t *testing.T) {
+	if exp := ExpandShorthand("essentials.(home|sethome)"); len(exp) != 2 || exp[0] != "essentials.home" || exp[1] != "essentials.sethome" {
+		t.Fatalf("unexpected pipe expansion: %v", exp)
+	}
+	if exp := ExpandShorthand("essentials.sethome.multiple.{1-4}"); len(exp) != 4 || exp[3] != "essentials.sethome.multiple.4" {
+		t.Fatalf("unexpected range expansion: %v", exp)
+	}
+	if !NewNode("essentials.{warp,tpa}.*", true).MatchesPermission("essentials.warp.spawn") {
+		t.Fatal("expected shorthand wildcard match for essentials.warp.spawn")
+	}
+	if NewNode("essentials.{warp,tpa}", true).MatchesPermission("essentials.home") {
+		t.Fatal("unexpected match for essentials.home")
+	}
+	reNode := Node{Key: "r=essentials\\.sethome\\.\\d+", Value: true}
+	if !reNode.MatchesPermission("essentials.sethome.12") {
+		t.Fatal("expected regex match for essentials.sethome.12")
+	}
+	if reNode.MatchesPermission("essentials.sethome.abc") {
+		t.Fatal("unexpected regex match for non-digits")
+	}
+}

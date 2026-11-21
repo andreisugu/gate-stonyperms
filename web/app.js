@@ -366,11 +366,40 @@
         onDelete: () => { entity.suffixes.splice(idx, 1); markDirty(); }
       });
     });
+    const coveredGlobalMeta = new Set();
+    (entity.metaEntries || []).forEach((me, idx) => {
+      const hasCtx = me.contexts && Object.keys(me.contexts).length > 0;
+      const isExp = Boolean(me.expiry && me.expiry > 0);
+      if (!isExp && !hasCtx) {
+        coveredGlobalMeta.add(String(me.key || '').toLowerCase());
+      }
+      rows.push({
+        rowId: `metaEntry:${idx}`, badge: 'META', cls: 'type-meta',
+        key: `${me.key} = ${me.value}`, value: true, toggleable: false,
+        expiry: me.expiry || 0, contexts: me.contexts || null,
+        onDelete: () => {
+          entity.metaEntries.splice(idx, 1);
+          if (!isExp && !hasCtx && entity.meta) {
+            delete entity.meta[me.key];
+          }
+          markDirty();
+        }
+      });
+    });
     Object.entries(entity.meta || {}).forEach(([mk, mv]) => {
+      if (coveredGlobalMeta.has(mk.toLowerCase())) return;
       rows.push({
         rowId: `meta:${mk}`, badge: 'META', cls: 'type-meta',
         key: `${mk} = ${mv}`, value: true, toggleable: false, expiry: 0, contexts: null,
-        onDelete: () => { delete entity.meta[mk]; markDirty(); }
+        onDelete: () => {
+          delete entity.meta[mk];
+          if (Array.isArray(entity.metaEntries)) {
+            entity.metaEntries = entity.metaEntries.filter(me =>
+              !(String(me.key || '').toLowerCase() === mk.toLowerCase() && !me.expiry && (!me.contexts || !Object.keys(me.contexts).length))
+            );
+          }
+          markDirty();
+        }
       });
     });
     (entity.nodes || []).forEach((n, idx) => {
@@ -1179,7 +1208,7 @@
       if (STATE.editor.groups.some(g => g.name === name)) return toast('Group already exists', true);
       const weight = parseInt(document.getElementById('cg-weight').value || '0', 10) || 0;
       const displayName = document.getElementById('cg-display').value.trim();
-      STATE.editor.groups.push({ name, displayName, weight, parents: [], nodes: [], meta: {}, prefixes: [], suffixes: [] });
+      STATE.editor.groups.push({ name, displayName, weight, parents: [], nodes: [], meta: {}, metaEntries: [], prefixes: [], suffixes: [] });
       STATE.editor.groups.sort((a, b) => (b.weight - a.weight) || a.name.localeCompare(b.name));
       STATE.deletedGroups.delete(name);
       STATE.selected = { type: 'group', id: name };
@@ -1255,7 +1284,7 @@
       if (STATE.editor.users.some(u => u.uuid === id)) return toast('User already exists', true);
       STATE.editor.users.push({
         uuid: id, username: username || id, primaryGroup: (STATE.editor.metadata && STATE.editor.metadata.defaultGroup) || 'default',
-        parents: [], nodes: [], meta: {}, prefixes: [], suffixes: []
+        parents: [], nodes: [], meta: {}, metaEntries: [], prefixes: [], suffixes: []
       });
       STATE.deletedUsers.delete(id);
       STATE.selected = { type: 'user', id };
@@ -1465,8 +1494,18 @@
       } else if (t === 'META') {
         const mk = STATE.addForm.metaKey.trim();
         if (!mk) return toast('Meta key is required', true);
-        entity.meta = entity.meta || {};
-        entity.meta[mk] = rawKey;
+        entity.metaEntries = entity.metaEntries || [];
+        const ctxKey = JSON.stringify(Object.keys(ctxs || {}).sort().map(k => [k, ctxs[k]]));
+        entity.metaEntries = entity.metaEntries.filter(me => {
+          const sameKey = String(me.key || '').toLowerCase() === mk.toLowerCase();
+          const meCtxKey = JSON.stringify(Object.keys(me.contexts || {}).sort().map(k => [k, me.contexts[k]]));
+          return !(sameKey && meCtxKey === ctxKey);
+        });
+        entity.metaEntries.push({ key: mk, value: rawKey, ...(expiry ? { expiry } : {}), ...(ctxs ? { contexts: ctxs } : {}) });
+        if (!expiry && !ctxs) {
+          entity.meta = entity.meta || {};
+          entity.meta[mk] = rawKey;
+        }
       }
 
       STATE.addForm.key = '';

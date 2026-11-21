@@ -142,6 +142,7 @@ type deleteTrackResponse struct {
 type setParentRequest struct {
 	Group           string            `json:"group"`
 	Mode            string            `json:"mode"`
+	Modifier        string            `json:"modifier"`
 	DurationSeconds int64             `json:"durationSeconds"`
 	Expiry          int64             `json:"expiry"`
 	Contexts        map[string]string `json:"contexts"`
@@ -151,6 +152,7 @@ type setParentRequest struct {
 type deleteParentRequest struct {
 	Group    string            `json:"group"`
 	Contexts map[string]string `json:"contexts"`
+	TempOnly bool              `json:"tempOnly"`
 }
 
 type setPrimaryGroupRequest struct {
@@ -160,6 +162,7 @@ type setPrimaryGroupRequest struct {
 type setPermissionRequest struct {
 	Key             string            `json:"key"`
 	Value           *bool             `json:"value"`
+	Modifier        string            `json:"modifier"`
 	DurationSeconds int64             `json:"durationSeconds"`
 	Expiry          int64             `json:"expiry"`
 	Contexts        map[string]string `json:"contexts"`
@@ -168,22 +171,76 @@ type setPermissionRequest struct {
 type deletePermissionRequest struct {
 	Key      string            `json:"key"`
 	Contexts map[string]string `json:"contexts"`
+	TempOnly bool              `json:"tempOnly"`
 }
 
 type setMetaRequest struct {
-	Value string `json:"value"`
+	Value           string            `json:"value"`
+	DurationSeconds int64             `json:"durationSeconds"`
+	Expiry          int64             `json:"expiry"`
+	Contexts        map[string]string `json:"contexts"`
+	Modifier        string            `json:"modifier"`
+}
+
+type deleteMetaRequest struct {
+	Contexts map[string]string `json:"contexts"`
+	TempOnly bool              `json:"tempOnly"`
 }
 
 type setAffixRequest struct {
 	Priority        int               `json:"priority"`
 	Value           string            `json:"value"`
+	Mode            string            `json:"mode"`
+	Modifier        string            `json:"modifier"`
 	DurationSeconds int64             `json:"durationSeconds"`
 	Expiry          int64             `json:"expiry"`
 	Contexts        map[string]string `json:"contexts"`
 }
 
 type deleteAffixRequest struct {
-	Priority *int `json:"priority"`
+	Priority *int              `json:"priority"`
+	Value    string            `json:"value"`
+	Contexts map[string]string `json:"contexts"`
+	TempOnly bool              `json:"tempOnly"`
+}
+
+type searchResponse struct {
+	Revision  uint64              `json:"revision"`
+	Query     string              `json:"query"`
+	GroupHits []manager.SearchHit `json:"groupHits"`
+	UserHits  []manager.SearchHit `json:"userHits"`
+}
+
+type bulkConstraintRequest struct {
+	Field    string `json:"field"`
+	Operator string `json:"operator"`
+	Pattern  string `json:"pattern"`
+}
+
+type bulkUpdateRequest struct {
+	Scope       string                  `json:"scope"`
+	Action      string                  `json:"action"`
+	Field       string                  `json:"field"`
+	Value       string                  `json:"value"`
+	Constraints []bulkConstraintRequest `json:"constraints"`
+	DryRun      bool                    `json:"dryRun"`
+}
+
+type trackSetRequest struct {
+	Group    string            `json:"group"`
+	Contexts map[string]string `json:"contexts"`
+}
+
+type userTrackClearResponse struct {
+	Revision uint64      `json:"revision"`
+	Removed  bool        `json:"removed"`
+	User     *model.User `json:"user"`
+}
+
+type groupTrackClearResponse struct {
+	Revision uint64       `json:"revision"`
+	Removed  bool         `json:"removed"`
+	Group    *model.Group `json:"group"`
 }
 
 type trackActionRequest struct {

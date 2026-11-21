@@ -417,7 +417,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			case "group", "g":
 				candidates = []string{"info", "setweight", "setdisplayname", "permission", "parent", "meta", "rename", "clone", "listmembers", "showtracks", "editor", "clear"}
 			case "track", "t":
-				candidates = []string{"info", "append", "insert", "remove", "rename", "clear"}
+				candidates = []string{"info", "append", "insert", "remove", "rename", "clone", "editor", "clear"}
 			case "check":
 				candidates = commonPermNodes
 			case "creategroup":

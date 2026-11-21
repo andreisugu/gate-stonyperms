@@ -18,6 +18,9 @@ const defaultConfigTemplate = `# ===============================================
 # The default group assigned to newly joined players if no group is assigned.
 default_group = "default"
 
+# How a player's primary group is calculated: "stored", "parents-by-weight", or "all-parents-by-weight".
+primary_group_calculation = "stored"
+
 # Storage method to persist permissions data.
 # Supported options: "json" (flat-file)
 storage_type = "json"
@@ -99,12 +102,13 @@ stack_deduplicate = true
 
 // Config represents the top-level StonyPerms configuration.
 type Config struct {
-	DefaultGroup         string `toml:"default_group"`
-	StorageType          string `toml:"storage_type"`
-	StorageDir           string `toml:"storage_dir"`
-	ApplyGatePermissions bool   `toml:"apply_gate_permissions"`
-	ApplyServerContexts  bool   `toml:"apply_server_contexts"`
-	EnableAuditLog       bool   `toml:"enable_audit_log"`
+	DefaultGroup            string `toml:"default_group"`
+	PrimaryGroupCalculation string `toml:"primary_group_calculation"`
+	StorageType             string `toml:"storage_type"`
+	StorageDir              string `toml:"storage_dir"`
+	ApplyGatePermissions    bool   `toml:"apply_gate_permissions"`
+	ApplyServerContexts     bool   `toml:"apply_server_contexts"`
+	EnableAuditLog          bool   `toml:"enable_audit_log"`
 
 	APIEnabled              bool    `toml:"api_enabled"`
 	APIListen               string  `toml:"api_listen"`
@@ -139,6 +143,7 @@ type Config struct {
 func defaultConfig() *Config {
 	return &Config{
 		DefaultGroup:            "default",
+		PrimaryGroupCalculation: "stored",
 		StorageType:             "json",
 		StorageDir:              "config/stonyperms",
 		ApplyGatePermissions:    true,
@@ -179,6 +184,11 @@ func LoadConfig(filePath string) (*Config, error) {
 		return nil, err
 	}
 	cfg.APIEditorPublicURL = editorURL
+	primaryCalc, err := normalizePrimaryGroupCalculation(cfg.PrimaryGroupCalculation)
+	if err != nil {
+		return nil, err
+	}
+	cfg.PrimaryGroupCalculation = primaryCalc
 
 	return cfg, nil
 }
@@ -196,4 +206,17 @@ func normalizeEditorPublicURL(raw string) (string, error) {
 		return "", fmt.Errorf("api_editor_public_url must not contain a query or fragment")
 	}
 	return strings.TrimRight(trimmed, "/"), nil
+}
+
+func normalizePrimaryGroupCalculation(raw string) (string, error) {
+	clean := strings.ToLower(strings.TrimSpace(raw))
+	if clean == "" {
+		return "stored", nil
+	}
+	switch clean {
+	case "stored", "parents-by-weight", "all-parents-by-weight":
+		return clean, nil
+	default:
+		return "", fmt.Errorf("primary_group_calculation must be stored, parents-by-weight, or all-parents-by-weight")
+	}
 }

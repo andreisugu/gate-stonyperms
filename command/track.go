@@ -13,7 +13,7 @@ import (
 // HandleTrackDispatch routes /sp track <track> <subcommand> calls.
 func HandleTrackDispatch(mgr *manager.Manager, src command.Source, args []string) error {
 	if len(args) < 1 {
-		return src.SendMessage(Msg(Prefix + "&cUsage: /sp track <track> <info|append|insert|remove|clear|rename|clone>&r"))
+		return src.SendMessage(Msg(Prefix + "&cUsage: /sp track <track> <info|append|insert|remove|clear|rename|clone|editor>&r"))
 	}
 
 	trackName := strings.ToLower(args[0])
@@ -115,7 +115,27 @@ func HandleTrackDispatch(mgr *manager.Manager, src command.Source, args []string
 		mgr.LogAction(getActorName(src), "track", newName, fmt.Sprintf("Renamed track from '%s' to '%s'", oldName, newName))
 		return src.SendMessage(Msg(Prefix+"&aRenamed track &b%s&a to &b%s&a!&r", oldName, newName))
 
+	case "clone":
+		if len(rest) < 1 {
+			return src.SendMessage(Msg(Prefix + "&cUsage: /sp track <track> clone <newName>&r"))
+		}
+		newName := strings.ToLower(strings.TrimSpace(rest[0]))
+		if mgr.GetTrack(newName) != nil {
+			return src.SendMessage(Msg(Prefix+"&cTrack '&e%s&c' already exists.&r", newName))
+		}
+		cloned, _, err := mgr.CreateTrackWithActor(newName, track.Groups, getActorName(src))
+		if err != nil {
+			return src.SendMessage(Msg(Prefix+"&cFailed to clone track: %v&r", err))
+		}
+		return src.SendMessage(Msg(Prefix+"&aCloned track &b%s&a to &b%s&a (%d groups)!&r", track.Name, cloned.Name, len(cloned.Groups)))
+
+	case "editor", "ed":
+		return openEditorSession(mgr, src, manager.WebSessionCreateOptions{
+			Actor:        getActorName(src),
+			CommandAlias: "sp",
+		})
+
 	default:
-		return src.SendMessage(Msg(Prefix + "&cUnknown track subcommand. Available: info, append, insert, remove, clear, rename.&r"))
+		return src.SendMessage(Msg(Prefix + "&cUnknown track subcommand. Available: info, append, insert, remove, clear, rename, clone, editor.&r"))
 	}
 }

@@ -244,3 +244,25 @@ func TestSearchBulkUpdateConfirmAndExportImportCommands(t *testing.T) {
 		t.Fatalf("networksync: %v", err)
 	}
 }
+
+func TestTrackCloneAndEditor(t *testing.T) {
+	mgr, cleanup := setupTestManager(t)
+	defer cleanup()
+	_, _ = mgr.CreateGroup("vip", 10, "")
+	tr, _ := mgr.CreateTrack("staff")
+	_ = tr.Append("default")
+	_ = tr.Append("vip")
+	_ = mgr.SaveTrack(tr)
+
+	src := &dummySource{}
+	if err := Dispatch(mgr, src, []string{"track", "staff", "clone", "staff_copy"}); err != nil {
+		t.Fatalf("track clone: %v", err)
+	}
+	cloned := mgr.GetTrack("staff_copy")
+	if cloned == nil || len(cloned.Groups) != 2 || cloned.Groups[1] != "vip" {
+		t.Fatalf("expected cloned track with 2 groups, got %+v", cloned)
+	}
+	if err := Dispatch(mgr, src, []string{"track", "staff", "editor"}); err != nil {
+		t.Fatalf("track editor: %v", err)
+	}
+}
