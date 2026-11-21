@@ -115,7 +115,21 @@ var Plugin = proxy.Plugin{
 			cfg = defaultConfig()
 		}
 
-		store, err := storage.NewJSONStorage(cfg.StorageDir)
+		store, err := storage.Open(cfg.StorageType, cfg.StorageDir, storage.SQLConfig{
+			File:                   cfg.Database.File,
+			Host:                   cfg.Database.Host,
+			Port:                   cfg.Database.Port,
+			Database:               cfg.Database.Database,
+			Username:               cfg.Database.Username,
+			Password:               cfg.Database.Password,
+			PasswordFile:           cfg.Database.PasswordFile,
+			TablePrefix:            cfg.Database.TablePrefix,
+			SSLMode:                cfg.Database.SSLMode,
+			MaxOpenConns:           cfg.Database.MaxOpenConns,
+			MaxIdleConns:           cfg.Database.MaxIdleConns,
+			ConnMaxLifetimeSeconds: cfg.Database.ConnMaxLifetimeSeconds,
+			ConnectTimeoutSeconds:  cfg.Database.ConnectTimeoutSeconds,
+		})
 		if err != nil {
 			return err
 		}
@@ -123,6 +137,9 @@ var Plugin = proxy.Plugin{
 		mgr, err := manager.New(store)
 		if err != nil {
 			return err
+		}
+		if cfg.StorageDir != "" {
+			mgr.SetExportDir(filepath.Join(cfg.StorageDir, "exports"))
 		}
 		globalManager.Store(mgr)
 		mgr.SetDefaultGroup(cfg.DefaultGroup)
@@ -229,12 +246,17 @@ var Plugin = proxy.Plugin{
 			log.Info("NOTE: Gate's 'requireBuiltinCommandPermissions' is set to false in config.yml. Built-in proxy commands (/server, /send, /glist) will bypass permissions until enabled.")
 		}
 
+		storageTarget := cfg.StorageDir
+		if describer, ok := store.(interface{ DescribeTarget() string }); ok {
+			storageTarget = describer.DescribeTarget()
+		}
 		uCount, gCount, tCount, _ := mgr.Stats()
 		log.Info("StonyPerms successfully initialized",
 			"users", uCount,
 			"groups", gCount,
 			"tracks", tCount,
 			"storage", cfg.StorageType,
+			"target", storageTarget,
 			"gate_hooks", cfg.ApplyGatePermissions,
 		)
 

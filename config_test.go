@@ -97,3 +97,46 @@ func TestBuildAPIOptionsFailClosedOnMissingOrOverlappingWriteToken(t *testing.T)
 		t.Fatal("expected api.New to refuse startup when read and write tokens overlap")
 	}
 }
+
+func TestLoadConfigDatabaseAndValidation(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "sp.toml")
+
+	dbToml := `
+storage_type = "postgres"
+storage_dir = "config/sp"
+
+[database]
+host = "pg.internal"
+port = 5432
+database = "perms"
+username = "sp"
+table_prefix = "sp_prod_"
+ssl_mode = "require"
+max_open_conns = 16
+`
+	if err := os.WriteFile(cfgPath, []byte(dbToml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig postgres: %v", err)
+	}
+	if cfg.StorageType != "postgresql" || cfg.Database.Host != "pg.internal" || cfg.Database.TablePrefix != "sp_prod_" || cfg.Database.MaxOpenConns != 16 {
+		t.Fatalf("unexpected database config: %+v", cfg)
+	}
+
+	if err := os.WriteFile(cfgPath, []byte(`storage_type = "invalid"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(cfgPath); err == nil {
+		t.Fatal("expected error for invalid storage_type")
+	}
+
+	if err := os.WriteFile(cfgPath, []byte("storage_type = \"sqlite\"\n[database]\ntable_prefix = \"bad-prefix!\""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(cfgPath); err == nil {
+		t.Fatal("expected error for invalid database.table_prefix")
+	}
+}

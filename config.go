@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/andreisugu/gate-stonyperms/storage"
 )
 
 const defaultConfigTemplate = `# =============================================================================
@@ -22,11 +24,28 @@ default_group = "default"
 primary_group_calculation = "stored"
 
 # Storage method to persist permissions data.
-# Supported options: "json" (flat-file)
+# Supported options: "json" (flat-file), "sqlite", "mysql", "mariadb", "postgresql"
 storage_type = "json"
 
-# Directory where permissions, users, groups, tracks, and logs are stored.
+# Directory where flat-file JSON permissions, default SQLite DB, and exports are stored.
 storage_dir = "config/stonyperms"
+
+# Relational SQL database settings (used when storage_type is sqlite/mysql/mariadb/postgresql).
+# Passwords may also be provided via STONYPERMS_DB_PASSWORD or database.password_file.
+[database]
+file = ""                  # Optional override for sqlite; defaults to <storage_dir>/stonyperms.db
+host = "127.0.0.1"
+port = 0                   # 0 uses engine default (3306 for mysql/mariadb, 5432 for postgresql)
+database = "stonyperms"
+username = "stonyperms"
+password = ""
+password_file = ""
+table_prefix = "stonyperms_"
+ssl_mode = "prefer"        # disable | prefer | require | verify-ca | verify-full | skip-verify
+max_open_conns = 10
+max_idle_conns = 5
+conn_max_lifetime_seconds = 1800
+connect_timeout_seconds = 5
 
 # Whether to automatically inject StonyPerms into Gate's internal permission system.
 # When enabled, Gate commands (/server, /send, /glist, etc.) and player checks
@@ -100,15 +119,33 @@ suffix_end_spacer = ""
 stack_deduplicate = true
 `
 
+// DatabaseConfig configures relational SQL backends (sqlite, mysql, mariadb, postgresql).
+type DatabaseConfig struct {
+	File                   string `toml:"file"`
+	Host                   string `toml:"host"`
+	Port                   int    `toml:"port"`
+	Database               string `toml:"database"`
+	Username               string `toml:"username"`
+	Password               string `toml:"password"`
+	PasswordFile           string `toml:"password_file"`
+	TablePrefix            string `toml:"table_prefix"`
+	SSLMode                string `toml:"ssl_mode"`
+	MaxOpenConns           int    `toml:"max_open_conns"`
+	MaxIdleConns           int    `toml:"max_idle_conns"`
+	ConnMaxLifetimeSeconds int    `toml:"conn_max_lifetime_seconds"`
+	ConnectTimeoutSeconds  int    `toml:"connect_timeout_seconds"`
+}
+
 // Config represents the top-level StonyPerms configuration.
 type Config struct {
-	DefaultGroup            string `toml:"default_group"`
-	PrimaryGroupCalculation string `toml:"primary_group_calculation"`
-	StorageType             string `toml:"storage_type"`
-	StorageDir              string `toml:"storage_dir"`
-	ApplyGatePermissions    bool   `toml:"apply_gate_permissions"`
-	ApplyServerContexts     bool   `toml:"apply_server_contexts"`
-	EnableAuditLog          bool   `toml:"enable_audit_log"`
+	DefaultGroup            string         `toml:"default_group"`
+	PrimaryGroupCalculation string         `toml:"primary_group_calculation"`
+	StorageType             string         `toml:"storage_type"`
+	StorageDir              string         `toml:"storage_dir"`
+	Database                DatabaseConfig `toml:"database"`
+	ApplyGatePermissions    bool           `toml:"apply_gate_permissions"`
+	ApplyServerContexts     bool           `toml:"apply_server_contexts"`
+	EnableAuditLog          bool           `toml:"enable_audit_log"`
 
 	APIEnabled              bool    `toml:"api_enabled"`
 	APIListen               string  `toml:"api_listen"`
@@ -146,6 +183,17 @@ func defaultConfig() *Config {
 		PrimaryGroupCalculation: "stored",
 		StorageType:             "json",
 		StorageDir:              "config/stonyperms",
+		Database: DatabaseConfig{
+			Host:                   "127.0.0.1",
+			Database:               "stonyperms",
+			Username:               "stonyperms",
+			TablePrefix:            "stonyperms_",
+			SSLMode:                "prefer",
+			MaxOpenConns:           10,
+			MaxIdleConns:           5,
+			ConnMaxLifetimeSeconds: 1800,
+			ConnectTimeoutSeconds:  5,
+		},
 		ApplyGatePermissions:    true,
 		ApplyServerContexts:     true,
 		EnableAuditLog:          true,
@@ -189,6 +237,17 @@ func LoadConfig(filePath string) (*Config, error) {
 		return nil, err
 	}
 	cfg.PrimaryGroupCalculation = primaryCalc
+	storageType, err := storage.NormalizeStorageType(cfg.StorageType)
+	if err != nil {
+		return nil, err
+	}
+	cfg.StorageType = storageType
+	if cfg.Database.TablePrefix == "" {
+		cfg.Database.TablePrefix = "stonyperms_"
+	}
+	if err := storage.ValidateTablePrefix(cfg.Database.TablePrefix); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }

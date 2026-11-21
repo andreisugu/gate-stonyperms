@@ -151,7 +151,28 @@ suffix_start_spacer = ""
 suffix_middle_spacer = ""
 suffix_end_spacer = ""
 stack_deduplicate = true
+
+# Optional relational storage (storage_type = "sqlite", "mysql", "mariadb", or "postgresql")
+[database]
+file = ""
+host = "127.0.0.1"
+port = 0
+database = "stonyperms"
+username = "stonyperms"
+password = ""
+password_file = ""
+table_prefix = "stonyperms_"
+ssl_mode = "prefer"
 ```
+
+### Storage Backends & Migration
+
+StonyPerms supports flat-file **`json`** (default) as well as pure-Go (`CGO_ENABLED=0` compatible) **`sqlite`**, **`mariadb`** / **`mysql`**, and **`postgresql`** using the canonical v1 relational schema shared identically with [`stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge):
+
+- **SQLite:** Set `storage_type = "sqlite"` (defaults to `<storage_dir>/stonyperms.db` in WAL mode with foreign keys enabled).
+- **MariaDB / MySQL:** Set `storage_type = "mariadb"` or `"mysql"`, host/database/username, and supply the password via `STONYPERMS_DB_PASSWORD`, `database.password_file`, or `database.password`.
+- **PostgreSQL:** Set `storage_type = "postgresql"` (or `"postgres"`), host/database/username/ssl_mode, and credential env/file.
+- **Migrating between backends:** Run `/sp export backup.json`, switch `storage_type` and `[database]` in `config/stonyperms.toml`, restart Gate, and run `/sp import backup.json confirm`.
 
 ---
 
