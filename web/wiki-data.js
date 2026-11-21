@@ -65,6 +65,11 @@ window.STONYPERMS_WIKI = [
           <tr><td><code>api_write_enabled</code></td><td><code>false</code></td><td>Enables mutating <code>/v1/*</code> endpoints for Bridge/webhooks</td></tr>
           <tr><td><code>api_editor_public_url</code></td><td><code>""</code></td><td>Public origin advertised by <code>/sp editor</code> (reverse proxy or GitHub Pages)</td></tr>
           <tr><td><code>api_sse_enabled</code></td><td><code>true</code></td><td>Streams live revision events at <code>GET /v1/events</code></td></tr>
+          <tr><td><code>prefix_stacking</code></td><td><code>false</code></td><td>Concatenates active prefixes across groups/users by priority instead of single highest prefix</td></tr>
+          <tr><td><code>prefix_start_spacer</code> / <code>prefix_middle_spacer</code> / <code>prefix_end_spacer</code></td><td><code>""</code></td><td>Spacers wrapped around and inserted between stacked prefixes</td></tr>
+          <tr><td><code>suffix_stacking</code></td><td><code>false</code></td><td>Concatenates active suffixes by priority instead of single highest suffix</td></tr>
+          <tr><td><code>suffix_start_spacer</code> / <code>suffix_middle_spacer</code> / <code>suffix_end_spacer</code></td><td><code>""</code></td><td>Spacers wrapped around and inserted between stacked suffixes</td></tr>
+          <tr><td><code>stack_deduplicate</code></td><td><code>true</code></td><td>Deduplicates identical values when stacking prefixes or suffixes</td></tr>
         </tbody>
       </table>
     `
@@ -89,7 +94,11 @@ window.STONYPERMS_WIKI = [
         <thead><tr><th>Command</th><th>Permission</th><th>Description</th></tr></thead>
         <tbody>
           <tr><td><code>/sp info</code></td><td><code>stonyperms.info</code></td><td>Show loaded user, group, track &amp; revision stats</td></tr>
-          <tr><td><code>/sp sync</code></td><td><code>stonyperms.sync</code></td><td>Reload data from storage &amp; broadcast SSE update</td></tr>
+          <tr><td><code>/sp sync</code> / <code>/sp networksync</code></td><td><code>stonyperms.sync</code></td><td>Reload data from storage &amp; broadcast live SSE update</td></tr>
+          <tr><td><code>/sp search &lt;perm|group.&lt;name&gt;&gt; [page]</code></td><td><code>stonyperms.search</code></td><td>Search users &amp; groups holding a permission or parent group</td></tr>
+          <tr><td><code>/sp bulkupdate &lt;scope&gt; &lt;update|delete&gt; ...</code></td><td><code>stonyperms.bulkupdate</code></td><td>Preview (60s <code>confirm &lt;code&gt;</code>) or <code>--confirm</code> bulk edit/delete nodes</td></tr>
+          <tr><td><code>/sp export &lt;file&gt;</code></td><td><code>stonyperms.export</code></td><td>Export all groups, tracks &amp; users to JSON or <code>.json.gz</code></td></tr>
+          <tr><td><code>/sp import &lt;file&gt; [--replace]</code></td><td><code>stonyperms.import</code></td><td>Restore or merge groups, tracks &amp; users from a snapshot file</td></tr>
           <tr><td><code>/sp check &lt;user&gt; &lt;perm&gt; [ctx]</code></td><td><code>stonyperms.check</code></td><td>Trace permission result &amp; inheritance source</td></tr>
           <tr><td><code>/sp editor [filter]</code></td><td><code>stonyperms.editor</code></td><td>Open StonyPermsWeb editor session</td></tr>
           <tr><td><code>/sp applyedits &lt;code&gt;</code></td><td><code>stonyperms.applyedits</code></td><td>Apply portable <code>sp1_...</code> or short <code>sp_...</code> edit code</td></tr>
@@ -107,12 +116,20 @@ window.STONYPERMS_WIKI = [
       <h1>User Commands</h1>
       <pre><code>/sp user &lt;user|uuid&gt; info
 /sp user &lt;user&gt; editor
+/sp user &lt;user&gt; permission info [page]
 /sp user &lt;user&gt; permission set &lt;node&gt; [true|false] [context...]
-/sp user &lt;user&gt; permission settemp &lt;node&gt; &lt;true|false&gt; &lt;duration&gt; [context...]
-/sp user &lt;user&gt; parent &lt;add|set|remove|switchprimarygroup&gt; &lt;group&gt;
+/sp user &lt;user&gt; permission settemp &lt;node&gt; [true|false] &lt;dur&gt; [accumulate|replace|deny] [ctx...]
+/sp user &lt;user&gt; permission unsettemp &lt;node&gt; [context...]
+/sp user &lt;user&gt; parent &lt;add|set|remove|switchprimarygroup&gt; &lt;group&gt; [context...]
+/sp user &lt;user&gt; parent addtemp &lt;group&gt; &lt;dur&gt; [accumulate|replace|deny] [context...]
+/sp user &lt;user&gt; parent removetemp &lt;group&gt; [context...]
+/sp user &lt;user&gt; parent &lt;settrack|cleartrack&gt; &lt;track&gt; [group] [context...]
 /sp user &lt;user&gt; promote &lt;track&gt;
 /sp user &lt;user&gt; demote &lt;track&gt;
-/sp user &lt;user&gt; meta setprefix &lt;priority&gt; "&lt;prefix&gt;"</code></pre>
+/sp user &lt;user&gt; meta &lt;set|unset&gt; &lt;key&gt; [value] [context...]
+/sp user &lt;user&gt; meta settemp &lt;key&gt; &lt;val&gt; &lt;dur&gt; [accumulate|replace|deny] [context...]
+/sp user &lt;user&gt; meta &lt;addprefix|setprefix|addsuffix|setsuffix&gt; &lt;prio&gt; "&lt;val&gt;" [ctx...]
+/sp user &lt;user&gt; meta &lt;addtempprefix|settempprefix&gt; &lt;prio&gt; "&lt;val&gt;" &lt;dur&gt; [mod] [ctx...]</code></pre>
     `
   },
   {
@@ -125,8 +142,9 @@ window.STONYPERMS_WIKI = [
 /sp group &lt;group&gt; editor
 /sp group &lt;group&gt; setweight &lt;weight&gt;
 /sp group &lt;group&gt; setdisplayname &lt;name&gt;
-/sp group &lt;group&gt; permission set &lt;node&gt; [true|false] [context...]
-/sp group &lt;group&gt; parent add &lt;parentGroup&gt; [context...]
+/sp group &lt;group&gt; permission &lt;info|set|unset|settemp|unsettemp|check|clear&gt; ...
+/sp group &lt;group&gt; parent &lt;add|set|remove|addtemp|removetemp|settrack|cleartrack&gt; ...
+/sp group &lt;group&gt; meta &lt;info|set|unset|settemp|addprefix|setprefix|...&gt; ...
 /sp group &lt;group&gt; listmembers</code></pre>
     `
   },
@@ -162,7 +180,7 @@ window.STONYPERMS_WIKI = [
     title: "Prefixes, Suffixes & Meta",
     html: `
       <h1>Prefixes, Suffixes &amp; Meta</h1>
-      <p>Prefixes and suffixes use integer <code>priority</code> values across both direct user entries and inherited groups (with group weights acting as tie-breakers). Legacy color codes (<code>&amp;3[VIP] </code>) are preserved directly for Gate, BetterTab, and Bridge chat/Vault adapters.</p>
+      <p>Prefixes, suffixes, and custom metadata support contexts (<code>server=lobby</code>) and expiring temporary entries (<code>accumulate</code>, <code>replace</code>, or <code>deny</code>). With <code>prefix_stacking</code> or <code>suffix_stacking</code> enabled, StonyPerms joins active affixes in descending priority order using configurable start/middle/end spacers and optional deduplication, while <code>setprefix</code> replaces prior entries in matching contexts and <code>addprefix</code> retains them. Legacy color codes (<code>&amp;3[VIP] </code>) are preserved directly for Gate, BetterTab, and Bridge chat/Vault adapters.</p>
     `
   },
   {
@@ -171,7 +189,7 @@ window.STONYPERMS_WIKI = [
     title: "Contexts",
     html: `
       <h1>Contextual Permissions</h1>
-      <p>Restrict permissions, inheritance, prefixes, or suffixes to specific servers or worlds using key-value contexts like <code>server=lobby</code> or <code>world=world_nether</code>. Nodes with no contexts apply globally across the proxy and all connected backend servers.</p>
+      <p>Restrict permissions, inheritance, custom metadata keys, prefixes, or suffixes to specific servers or worlds using key-value contexts like <code>server=lobby</code> or <code>world=world_nether</code>. Nodes with no contexts apply globally across the proxy and all connected backend servers.</p>
     `
   },
   {

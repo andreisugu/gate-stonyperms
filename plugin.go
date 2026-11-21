@@ -16,6 +16,7 @@ import (
 
 	"github.com/andreisugu/gate-stonyperms/api"
 	"github.com/andreisugu/gate-stonyperms/command"
+	"github.com/andreisugu/gate-stonyperms/engine"
 	"github.com/andreisugu/gate-stonyperms/manager"
 	"github.com/andreisugu/gate-stonyperms/storage"
 )
@@ -125,6 +126,17 @@ var Plugin = proxy.Plugin{
 			DefaultGroup:  cfg.DefaultGroup,
 			LiveSave:      cfg.APIEnabled,
 			PluginVersion: "0.3.0",
+		})
+		mgr.Engine().SetStackConfig(engine.StackConfig{
+			PrefixEnabled:     cfg.PrefixStacking,
+			PrefixStartSpacer: cfg.PrefixStartSpacer,
+			PrefixMidSpacer:   cfg.PrefixMiddleSpacer,
+			PrefixEndSpacer:   cfg.PrefixEndSpacer,
+			SuffixEnabled:     cfg.SuffixStacking,
+			SuffixStartSpacer: cfg.SuffixStartSpacer,
+			SuffixMidSpacer:   cfg.SuffixMiddleSpacer,
+			SuffixEndSpacer:   cfg.SuffixEndSpacer,
+			Deduplicate:       cfg.StackDeduplicate,
 		})
 
 		// Start the optional HTTP API used by backend adapters and integrations.

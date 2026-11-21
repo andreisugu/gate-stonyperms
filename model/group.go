@@ -13,6 +13,7 @@ type Group struct {
 	Parents     []Inheritance     `json:"parents,omitempty"`
 	Nodes       []Node            `json:"nodes,omitempty"`
 	Meta        map[string]string `json:"meta,omitempty"`
+	MetaEntries []MetaEntry       `json:"metaEntries,omitempty"`
 	Prefixes    []PriorityMeta    `json:"prefixes,omitempty"`
 	Suffixes    []PriorityMeta    `json:"suffixes,omitempty"`
 }
@@ -21,13 +22,14 @@ type Group struct {
 func NewGroup(name string, weight int) *Group {
 	cleanName := strings.ToLower(strings.TrimSpace(name))
 	return &Group{
-		Name:     cleanName,
-		Weight:   weight,
-		Parents:  make([]Inheritance, 0),
-		Nodes:    make([]Node, 0),
-		Meta:     make(map[string]string),
-		Prefixes: make([]PriorityMeta, 0),
-		Suffixes: make([]PriorityMeta, 0),
+		Name:        cleanName,
+		Weight:      weight,
+		Parents:     make([]Inheritance, 0),
+		Nodes:       make([]Node, 0),
+		Meta:        make(map[string]string),
+		MetaEntries: make([]MetaEntry, 0),
+		Prefixes:    make([]PriorityMeta, 0),
+		Suffixes:    make([]PriorityMeta, 0),
 	}
 }
 
@@ -41,14 +43,12 @@ func (g *Group) GetDisplayName() string {
 
 // AddNode adds or updates a permission node in this group.
 func (g *Group) AddNode(node Node) {
-	node.Key = strings.ToLower(strings.TrimSpace(node.Key))
-	for i, existing := range g.Nodes {
-		if existing.Key == node.Key && SameContexts(existing.Contexts, node.Contexts) {
-			g.Nodes[i] = node
-			return
-		}
-	}
-	g.Nodes = append(g.Nodes, node)
+	_, _ = g.AddNodeWithModifier(node, TempModifierReplace, time.Now())
+}
+
+// AddNodeWithModifier adds or updates a group node respecting temporary modifiers.
+func (g *Group) AddNodeWithModifier(node Node, mod TempModifier, now time.Time) (Node, error) {
+	return addNodeWithModifier(&g.Nodes, node, mod, now)
 }
 
 // RemoveNode removes a permission node by key and contexts. Returns true if removed.
@@ -63,16 +63,19 @@ func (g *Group) RemoveNode(key string, contexts map[string]string) bool {
 	return false
 }
 
+// RemoveTempNode removes a temporary permission node by key and contexts.
+func (g *Group) RemoveTempNode(key string, contexts map[string]string) bool {
+	return removeTempNode(&g.Nodes, key, contexts)
+}
+
 // AddParent adds an inheritance relationship to a parent group.
 func (g *Group) AddParent(inh Inheritance) {
-	inh.Group = strings.ToLower(strings.TrimSpace(inh.Group))
-	for i, existing := range g.Parents {
-		if existing.Group == inh.Group && SameContexts(existing.Contexts, inh.Contexts) {
-			g.Parents[i] = inh
-			return
-		}
-	}
-	g.Parents = append(g.Parents, inh)
+	_, _ = g.AddParentWithModifier(inh, TempModifierReplace, time.Now())
+}
+
+// AddParentWithModifier adds a parent inheritance relationship respecting temporary modifiers.
+func (g *Group) AddParentWithModifier(inh Inheritance, mod TempModifier, now time.Time) (Inheritance, error) {
+	return addParentWithModifier(&g.Parents, inh, mod, now)
 }
 
 // RemoveParent removes a parent inheritance relationship.
@@ -87,119 +90,84 @@ func (g *Group) RemoveParent(groupName string, contexts map[string]string) bool 
 	return false
 }
 
+// RemoveTempParent removes a temporary parent inheritance relationship.
+func (g *Group) RemoveTempParent(groupName string, contexts map[string]string) bool {
+	return removeTempParent(&g.Parents, groupName, contexts)
+}
+
 // SetMeta sets a key-value metadata entry.
 func (g *Group) SetMeta(key, value string) {
-	if g.Meta == nil {
-		g.Meta = make(map[string]string)
-	}
-	g.Meta[key] = value
+	_, _ = g.SetMetaEntry(MetaEntry{Key: key, Value: value}, TempModifierReplace, time.Now())
+}
+
+// SetMetaEntry sets a permanent, temporary, or contextual metadata entry.
+func (g *Group) SetMetaEntry(entry MetaEntry, mod TempModifier, now time.Time) (MetaEntry, error) {
+	return setMetaEntry(&g.Meta, &g.MetaEntries, entry, mod, now)
 }
 
 // UnsetMeta removes a key-value metadata entry.
 func (g *Group) UnsetMeta(key string) bool {
-	if g.Meta == nil {
-		return false
-	}
-	if _, ok := g.Meta[key]; ok {
-		delete(g.Meta, key)
-		return true
-	}
-	return false
+	return g.UnsetMetaEntry(key, nil, false)
+}
+
+// UnsetMetaEntry removes metadata entries matching key, contexts, and tempOnly filter.
+func (g *Group) UnsetMetaEntry(key string, contexts map[string]string, tempOnly bool) bool {
+	return unsetMetaEntry(&g.Meta, &g.MetaEntries, key, contexts, tempOnly)
 }
 
 // AddPrefix adds a prefix with priority.
 func (g *Group) AddPrefix(pm PriorityMeta) {
-	for i, existing := range g.Prefixes {
-		if existing.Priority == pm.Priority && SameContexts(existing.Contexts, pm.Contexts) {
-			g.Prefixes[i] = pm
-			return
-		}
-	}
-	g.Prefixes = append(g.Prefixes, pm)
+	_, _ = g.AddPrefixWithModifier(pm, TempModifierReplace, time.Now())
+}
+
+// AddPrefixWithModifier adds a prefix respecting temporary modifiers.
+func (g *Group) AddPrefixWithModifier(pm PriorityMeta, mod TempModifier, now time.Time) (PriorityMeta, error) {
+	return addAffixWithModifier(&g.Prefixes, pm, mod, now)
+}
+
+// SetPrefixInContext replaces prefixes sharing pm.Contexts before adding pm.
+func (g *Group) SetPrefixInContext(pm PriorityMeta) {
+	setAffixInContext(&g.Prefixes, pm)
 }
 
 // RemovePrefix removes a prefix matching priority.
 func (g *Group) RemovePrefix(priority int) bool {
-	for i, existing := range g.Prefixes {
-		if existing.Priority == priority {
-			g.Prefixes = append(g.Prefixes[:i], g.Prefixes[i+1:]...)
-			return true
-		}
-	}
-	return false
+	return g.RemovePrefixMatch(priority, "", nil, false)
+}
+
+// RemovePrefixMatch removes prefixes matching priority, optional value, optional contexts, and tempOnly.
+func (g *Group) RemovePrefixMatch(priority int, value string, contexts map[string]string, tempOnly bool) bool {
+	return removeAffixMatch(&g.Prefixes, priority, value, contexts, tempOnly)
 }
 
 // AddSuffix adds a suffix with priority.
 func (g *Group) AddSuffix(pm PriorityMeta) {
-	for i, existing := range g.Suffixes {
-		if existing.Priority == pm.Priority && SameContexts(existing.Contexts, pm.Contexts) {
-			g.Suffixes[i] = pm
-			return
-		}
-	}
-	g.Suffixes = append(g.Suffixes, pm)
+	_, _ = g.AddSuffixWithModifier(pm, TempModifierReplace, time.Now())
+}
+
+// AddSuffixWithModifier adds a suffix respecting temporary modifiers.
+func (g *Group) AddSuffixWithModifier(pm PriorityMeta, mod TempModifier, now time.Time) (PriorityMeta, error) {
+	return addAffixWithModifier(&g.Suffixes, pm, mod, now)
+}
+
+// SetSuffixInContext replaces suffixes sharing pm.Contexts before adding pm.
+func (g *Group) SetSuffixInContext(pm PriorityMeta) {
+	setAffixInContext(&g.Suffixes, pm)
 }
 
 // RemoveSuffix removes a suffix matching priority.
 func (g *Group) RemoveSuffix(priority int) bool {
-	for i, existing := range g.Suffixes {
-		if existing.Priority == priority {
-			g.Suffixes = append(g.Suffixes[:i], g.Suffixes[i+1:]...)
-			return true
-		}
-	}
-	return false
+	return g.RemoveSuffixMatch(priority, "", nil, false)
 }
 
-// CleanExpired removes any temporary nodes, parents, prefixes, or suffixes that have expired.
+// RemoveSuffixMatch removes suffixes matching priority, optional value, optional contexts, and tempOnly.
+func (g *Group) RemoveSuffixMatch(priority int, value string, contexts map[string]string, tempOnly bool) bool {
+	return removeAffixMatch(&g.Suffixes, priority, value, contexts, tempOnly)
+}
+
+// CleanExpired removes any temporary nodes, parents, prefixes, suffixes, or meta entries that have expired.
 func (g *Group) CleanExpired(now time.Time) int {
-	cleaned := 0
-
-	// Nodes
-	activeNodes := make([]Node, 0, len(g.Nodes))
-	for _, n := range g.Nodes {
-		if n.IsExpired(now) {
-			cleaned++
-		} else {
-			activeNodes = append(activeNodes, n)
-		}
-	}
-	g.Nodes = activeNodes
-
-	// Parents
-	activeParents := make([]Inheritance, 0, len(g.Parents))
-	for _, p := range g.Parents {
-		if p.IsExpired(now) {
-			cleaned++
-		} else {
-			activeParents = append(activeParents, p)
-		}
-	}
-	g.Parents = activeParents
-
-	// Prefixes
-	activePrefixes := make([]PriorityMeta, 0, len(g.Prefixes))
-	for _, p := range g.Prefixes {
-		if p.IsExpired(now) {
-			cleaned++
-		} else {
-			activePrefixes = append(activePrefixes, p)
-		}
-	}
-	g.Prefixes = activePrefixes
-
-	// Suffixes
-	activeSuffixes := make([]PriorityMeta, 0, len(g.Suffixes))
-	for _, s := range g.Suffixes {
-		if s.IsExpired(now) {
-			cleaned++
-		} else {
-			activeSuffixes = append(activeSuffixes, s)
-		}
-	}
-	g.Suffixes = activeSuffixes
-
-	return cleaned
+	return cleanExpiredCommon(&g.Nodes, &g.Parents, &g.Prefixes, &g.Suffixes, &g.MetaEntries, now)
 }
 
 // Clone creates a deep copy of the group with a new name.
@@ -211,6 +179,7 @@ func (g *Group) Clone(newName string) *Group {
 	for k, v := range g.Meta {
 		cloned.Meta[k] = v
 	}
+	cloned.MetaEntries = cloneMetaEntries(g.MetaEntries)
 	cloned.Prefixes = append(cloned.Prefixes, g.Prefixes...)
 	cloned.Suffixes = append(cloned.Suffixes, g.Suffixes...)
 	return cloned

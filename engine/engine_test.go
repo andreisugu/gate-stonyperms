@@ -224,3 +224,62 @@ func TestPrimaryGroupAffixPrecedence(t *testing.T) {
 		t.Fatalf("expected direct user suffix ' &d!', got %q", got)
 	}
 }
+
+func TestStackingAndContextualMeta(t *testing.T) {
+	eng := New()
+	eng.SetStackConfig(StackConfig{
+		PrefixEnabled:     true,
+		PrefixStartSpacer: "[",
+		PrefixMidSpacer:   " ",
+		PrefixEndSpacer:   "] ",
+		SuffixEnabled:     true,
+		SuffixMidSpacer:   " ",
+		Deduplicate:       true,
+	})
+
+	def := model.NewGroup("default", 0)
+	def.Prefixes = []model.PriorityMeta{{Priority: 10, Value: "Member"}}
+	def.SetMeta("homes", "1")
+
+	vip := model.NewGroup("vip", 100)
+	vip.AddParent(model.NewInheritance("default"))
+	vip.Prefixes = []model.PriorityMeta{{Priority: 100, Value: "VIP"}}
+	_, _ = vip.SetMetaEntry(model.MetaEntry{
+		Key:      "homes",
+		Value:    "5",
+		Priority: 50,
+		Contexts: map[string]string{"server": "survival"},
+	}, model.TempModifierReplace, time.Now())
+
+	staff := model.NewGroup("mod", 200)
+	staff.Prefixes = []model.PriorityMeta{
+		{Priority: 200, Value: "Mod"},
+		{Priority: 50, Value: "VIP"}, // duplicate value should be deduplicated
+	}
+	staff.Suffixes = []model.PriorityMeta{{Priority: 200, Value: "[Staff]"}}
+
+	groups := map[string]*model.Group{
+		"default": def,
+		"vip":     vip,
+		"mod":     staff,
+	}
+
+	u := model.NewUser(uuid.New(), "StackedUser")
+	u.PrimaryGroup = "mod"
+	u.AddParent(model.NewInheritance("vip"))
+
+	if got := eng.GetPrefix(u, groups, nil); got != "[Mod VIP Member] " {
+		t.Fatalf("stacked prefix = %q, want %q", got, "[Mod VIP Member] ")
+	}
+	if got := eng.GetSuffix(u, groups, nil); got != "[Staff]" {
+		t.Fatalf("stacked suffix = %q, want [Staff]", got)
+	}
+
+	// Context meta resolves server=survival override vs global fallback
+	if v, ok := eng.GetMetaWithContext(u, groups, "homes", map[string]string{"server": "survival"}); !ok || v != "5" {
+		t.Fatalf("survival homes = (%q, %v), want (5, true)", v, ok)
+	}
+	if v, ok := eng.GetMetaWithContext(u, groups, "homes", map[string]string{"server": "lobby"}); !ok || v != "1" {
+		t.Fatalf("lobby homes = (%q, %v), want (1, true)", v, ok)
+	}
+}

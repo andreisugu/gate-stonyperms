@@ -29,10 +29,10 @@
 
 ## ✨ Key Features
 
-- **LuckPerms-Style CLI (`/sp`):** Familiar `user`, `group`, `track`, `check`, `verbose`, and `log` trees with Brigadier auto-completion.
+- **LuckPerms-Style CLI (`/sp`):** Complete `user`, `group`, `track`, `check`, `search`, `bulkupdate`, `export`/`import`, `networksync`, `verbose`, and `log` trees with Brigadier auto-completion.
 - **Exact + Wildcard + Explicit Deny Evaluation:** Supports exact nodes (`gate.command.server`), sub-wildcards (`gate.command.*`, `*`), explicit `false` denials, and circular inheritance protection.
-- **Dynamic Contexts & Temporary Grants:** Per-server/world contexts (`server=lobby`) and expiring permissions, parent memberships, prefixes, and suffixes (`10m`, `2h`, `7d`, `30d`, `1y`).
-- **Weighted Inheritance, Tracks & Affixes:** Groups resolve in descending weight order alongside promotion tracks, priority-ordered prefixes/suffixes, and metadata keys.
+- **Dynamic Contexts & Temporary Modifiers:** Per-server/world contexts (`server=lobby`) and expiring permissions, parents, custom meta keys, prefixes, and suffixes with `accumulate`, `replace`, and `deny` collision modifiers.
+- **Weighted Inheritance, Tracks & Affix Stacking:** Groups resolve in descending weight order alongside promotion tracks (`settrack`/`cleartrack`), contextual metadata keys, and optional priority-ordered prefix/suffix stacking with custom spacers and deduplication.
 - **v0.2 Scoped HTTP API & Live SSE Stream:** Opt-in cross-server synchronization (`GET /v1/events` SSE invalidation, `ETag` snapshots, batch queries, idempotent audited writes, and multi-token rotation) for Paper, Fabric, web stores, and stats services.
 - **Built-In StonyPermsWeb Suite (`https://andreisugu.github.io/gate-stonyperms/`):** Embedded (`//go:embed`) & GitHub-Pages-hosted Web Permissions Editor (`/sp editor`), Verbose Viewer (`/sp verbose record` + `paste`), Permission Tree Viewer (`/sp tree`), built-in Wiki, and `Ctrl+K` quick search with one-click **Live Save** and portable `sp1_` `/sp applyedits` codes.
 - **Atomic Persistence & Live Verbose:** Crash-safe atomic JSON storage under `config/stonyperms/` and real-time permission decision tracing (`/sp verbose on`).
@@ -141,6 +141,16 @@ api_write_rate_limit_per_sec = 15
 api_write_rate_limit_burst = 30
 api_sse_enabled = true
 api_sse_max_clients = 32
+
+prefix_stacking = false
+prefix_start_spacer = ""
+prefix_middle_spacer = ""
+prefix_end_spacer = ""
+suffix_stacking = false
+suffix_start_spacer = ""
+suffix_middle_spacer = ""
+suffix_end_spacer = ""
+stack_deduplicate = true
 ```
 
 ---
@@ -155,6 +165,11 @@ api_sse_max_clients = 32
 | :--- | :--- |
 | `/sp info` | Show loaded counts, storage status, and verbose state |
 | `/sp sync` / `/sp reload` | Hot-reload permissions data from disk |
+| `/sp networksync` | Reload storage & broadcast live SSE update across backends |
+| `/sp search <permission\|group.<name>> [page]` | Search users and groups matching a node or parent |
+| `/sp bulkupdate <all\|users\|groups> <update\|delete> ...` | Preview (60s `confirm <code>`) or `--confirm` bulk changes |
+| `/sp export <file>` | Export groups, tracks & users to JSON or `.json.gz` |
+| `/sp import <file> [--replace]` | Restore or merge permissions from an export snapshot |
 | `/sp check <user> <permission> [context...]` | Trace an evaluated permission check |
 | `/sp verbose <on \| off \| record> [filter]` | Stream live permission checks to chat/console |
 | `/sp creategroup <group> [weight] [displayName]` | Create a new permission group |
@@ -180,11 +195,12 @@ api_sse_max_clients = 32
 #### User (`/sp user <user> ...`)
 ```text
 /sp user <user> info
+/sp user <user> permission info [page]
 /sp user <user> permission set <node> [true/false] [context...]
 /sp user <user> permission unset <node> [context...]
-/sp user <user> permission settemp <node> <true/false> <duration> [context...]
+/sp user <user> permission settemp <node> [true/false] <duration> [accumulate|replace|deny] [context...]
 /sp user <user> permission unsettemp <node> [context...]
-/sp user <user> permission check <node>
+/sp user <user> permission check <node> [context...]
 /sp user <user> permission clear [context...]
 
 /sp user <user> parent info
@@ -192,17 +208,30 @@ api_sse_max_clients = 32
 /sp user <user> parent add <group> [context...]
 /sp user <user> parent remove <group> [context...]
 /sp user <user> parent switchprimarygroup <group>
-/sp user <user> parent addtemp <group> <duration> [context...]
+/sp user <user> parent addtemp <group> <duration> [accumulate|replace|deny] [context...]
+/sp user <user> parent removetemp <group> [context...]
+/sp user <user> parent settrack <track> <group> [context...]
+/sp user <user> parent cleartrack <track> [context...]
 /sp user <user> parent clear [context...]
 
 /sp user <user> meta info
-/sp user <user> meta set <key> <value>
-/sp user <user> meta unset <key>
-/sp user <user> meta setprefix [priority] <prefix>
-/sp user <user> meta setsuffix [priority] <suffix>
-/sp user <user> meta removeprefix <priority>
-/sp user <user> meta removesuffix <priority>
-/sp user <user> meta clear
+/sp user <user> meta set <key> <value> [context...]
+/sp user <user> meta unset <key> [context...]
+/sp user <user> meta settemp <key> <value> <duration> [accumulate|replace|deny] [context...]
+/sp user <user> meta unsettemp <key> [context...]
+/sp user <user> meta addprefix <priority> <prefix> [context...]
+/sp user <user> meta setprefix [priority] <prefix> [context...]
+/sp user <user> meta addtempprefix <priority> <prefix> <duration> [accumulate|replace|deny] [context...]
+/sp user <user> meta settempprefix [priority] <prefix> <duration> [accumulate|replace|deny] [context...]
+/sp user <user> meta removeprefix <priority> [prefix] [context...]
+/sp user <user> meta removetempprefix <priority> [prefix] [context...]
+/sp user <user> meta addsuffix <priority> <suffix> [context...]
+/sp user <user> meta setsuffix [priority] <suffix> [context...]
+/sp user <user> meta addtempsuffix <priority> <suffix> <duration> [accumulate|replace|deny] [context...]
+/sp user <user> meta settempsuffix [priority] <suffix> <duration> [accumulate|replace|deny] [context...]
+/sp user <user> meta removesuffix <priority> [suffix] [context...]
+/sp user <user> meta removetempsuffix <priority> [suffix] [context...]
+/sp user <user> meta clear [all|prefix|suffix|meta]
 
 /sp user <user> promote <track>
 /sp user <user> demote <track>
@@ -222,9 +251,9 @@ api_sse_max_clients = 32
 /sp group <group> showtracks
 /sp group <group> clear
 
-/sp group <group> permission <set|unset|settemp|unsettemp|check|clear> ...
-/sp group <group> parent <info|add|set|remove|addtemp|clear> ...
-/sp group <group> meta <info|set|unset|setprefix|setsuffix|removeprefix|removesuffix|clear> ...
+/sp group <group> permission <info|set|unset|settemp|unsettemp|check|clear> ...
+/sp group <group> parent <info|add|set|remove|addtemp|removetemp|settrack|cleartrack|clear> ...
+/sp group <group> meta <info|set|unset|settemp|unsettemp|addprefix|setprefix|addtempprefix|settempprefix|removeprefix|removetempprefix|addsuffix|setsuffix|addtempsuffix|settempsuffix|removesuffix|removetempsuffix|clear> ...
 ```
 
 #### Tracks & Audit Log

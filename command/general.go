@@ -43,6 +43,11 @@ func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
 			MsgPlain(Separator()),
 			ClickableRunCmd("&b/sp info&r", "/sp info", "Display system diagnostic statistics & storage health"),
 			ClickableRunCmd("&b/sp sync&r", "/sp sync", "Hot-reload all permissions data from disk"),
+			ClickableRunCmd("&b/sp networksync&r", "/sp networksync", "Sync permissions across Gate and connected backends"),
+			ClickableCmd("&b/sp search <query> [page]&r", "/sp search ", "Search users and groups by permission or parent"),
+			ClickableCmd("&b/sp bulkupdate <scope> <update|delete> ...&r", "/sp bulkupdate ", "Mass update or delete matching nodes"),
+			ClickableCmd("&b/sp export <file>&r", "/sp export ", "Export full permissions snapshot to JSON/.json.gz"),
+			ClickableCmd("&b/sp import <file> [--replace]&r", "/sp import ", "Import permissions snapshot from file"),
 			ClickableCmd("&b/sp check <user> <perm> [context...]&r", "/sp check ", "Evaluate permission with trace"),
 			ClickableRunCmd("&b/sp editor [filter]&r", "/sp editor", "Open the interactive StonyPermsWeb editor"),
 			ClickableCmd("&b/sp applyedits <code>&r", "/sp applyedits ", "Apply saved edits from the web editor"),
@@ -66,16 +71,17 @@ func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
 			ClickableCmd("&b/sp user <user> info&r", "/sp user ", "Display user UUID, primary group, parents, and nodes"),
 			ClickableCmd("&b/sp user <user> permission set <node> [true/false] [context...]&r", "/sp user ", "Set permission node"),
 			ClickableCmd("&b/sp user <user> permission unset <node> [context...]&r", "/sp user ", "Remove direct node"),
-			ClickableCmd("&b/sp user <user> permission settemp <node> <val> <duration> [context...]&r", "/sp user ", "Set temporary permission"),
+			ClickableCmd("&b/sp user <user> permission info [page]&r", "/sp user ", "List direct permission nodes"),
+			ClickableCmd("&b/sp user <user> permission settemp <node> [val] <dur> [accumulate|replace|deny] [ctx]&r", "/sp user ", "Set temporary permission"),
 			ClickableCmd("&b/sp user <user> permission unsettemp <node> [context...]&r", "/sp user ", "Remove temporary permission"),
 			ClickableCmd("&b/sp user <user> parent add <group> [context...]&r", "/sp user ", "Add inherited parent group"),
 			ClickableCmd("&b/sp user <user> parent set <group> [context...]&r", "/sp user ", "Set sole parent & primary group"),
 			ClickableCmd("&b/sp user <user> parent remove <group> [context...]&r", "/sp user ", "Remove inherited parent group"),
 			ClickableCmd("&b/sp user <user> parent switchprimarygroup <group>&r", "/sp user ", "Switch primary group"),
-			ClickableCmd("&b/sp user <user> parent addtemp <group> <duration> [context...]&r", "/sp user ", "Add temporary parent"),
-			ClickableCmd("&b/sp user <user> meta set <key> <value>&r", "/sp user ", "Set custom metadata key-value"),
-			ClickableCmd("&b/sp user <user> meta setprefix [priority] <prefix>&r", "/sp user ", "Set player chat/tab prefix"),
-			ClickableCmd("&b/sp user <user> meta setsuffix [priority] <suffix>&r", "/sp user ", "Set player chat/tab suffix"),
+			ClickableCmd("&b/sp user <user> parent addtemp <group> <dur> [mod] [ctx]&r", "/sp user ", "Add temporary parent"),
+			ClickableCmd("&b/sp user <user> parent removetemp <group> [ctx]&r", "/sp user ", "Remove temporary parent"),
+			ClickableCmd("&b/sp user <user> parent settrack <track> <group> [ctx]&r", "/sp user ", "Set sole parent on track"),
+			ClickableCmd("&b/sp user <user> meta <set|settemp|addprefix|setprefix> ...&r", "/sp user ", "Manage meta keys & stacked affixes"),
 			ClickableCmd("&b/sp user <user> promote <track>&r", "/sp user ", "Progress player up a track"),
 			ClickableCmd("&b/sp user <user> demote <track>&r", "/sp user ", "Demote player down a track"),
 			ClickableCmd("&b/sp user <user> showtracks&r", "/sp user ", "Show user position in all tracks"),
@@ -192,6 +198,16 @@ func HandleInfo(mgr *manager.Manager, src command.Source) error {
 		_ = src.SendMessage(MsgPlain(line))
 	}
 	return nil
+}
+
+// HandleNetworkSync reloads storage and broadcasts a live SSE update with actor audit metadata.
+func HandleNetworkSync(mgr *manager.Manager, src command.Source) error {
+	_ = src.SendMessage(Msg(Prefix + "&7Synchronizing network permissions state...&r"))
+	if err := mgr.ReloadWithActor(getActorName(src)); err != nil {
+		return src.SendMessage(Msg(Prefix+"&cNetwork sync failed: %v&r", err))
+	}
+	uCount, gCount, tCount, _ := mgr.Stats()
+	return src.SendMessage(Msg(Prefix+"&aNetwork sync complete! &7(&e%d&7 users, &e%d&7 groups, &e%d&7 tracks, rev &b%d&7)&r", uCount, gCount, tCount, mgr.Revision()))
 }
 
 // HandleSync reloads data from disk.
