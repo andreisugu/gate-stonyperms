@@ -3,6 +3,7 @@ package manager
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -18,6 +19,13 @@ import (
 	"github.com/andreisugu/gate-stonyperms/storage"
 )
 
+var (
+	ErrTrackEmpty  = errors.New("track contains no groups")
+	ErrTrackTop    = errors.New("user is already at the highest group on track")
+	ErrTrackBottom = errors.New("user is already at the lowest group on track")
+	ErrNotOnTrack  = errors.New("user is not on track")
+)
+
 // Manager coordinates in-memory data, persistence, permission evaluation, and promotion tracks.
 type Manager struct {
 	mu             sync.RWMutex
@@ -29,6 +37,10 @@ type Manager struct {
 	tracks         map[string]*model.Track
 	logs           []model.LogEntry
 	updateListener atomic.Pointer[func()]
+	subMu          sync.Mutex
+	subscribers    map[uint64]*eventSubscriber
+	nextSubID      uint64
+	subClosed      bool
 	stopChan       chan struct{}
 	revision       atomic.Uint64
 	generation     string
@@ -65,8 +77,18 @@ type EffectiveUser struct {
 	Suffix       string
 }
 
+// GroupMemberInfo summarizes a user's membership in a group.
+type GroupMemberInfo struct {
+	UUID         uuid.UUID         `json:"uuid"`
+	Username     string            `json:"username"`
+	PrimaryGroup string            `json:"primaryGroup"`
+	Permanent    bool              `json:"permanent"`
+	Expiry       int64             `json:"expiry,omitempty"`
+	Contexts     map[string]string `json:"contexts,omitempty"`
+}
+
 // Revision returns a monotonically increasing counter that changes whenever
-// users or groups are modified. It is used for cheap cache validation by
+// users, groups, or tracks are modified. It is used for cheap cache validation by
 // external permission adapters.
 func (m *Manager) Revision() uint64 {
 	return m.revision.Load()
@@ -99,8 +121,8 @@ func (m *Manager) notifyUpdate() {
 // bumpRevisionLocked advances the visible-state version. Callers must hold
 // m.mu for writing so a snapshot cannot observe changed state with an old
 // revision.
-func (m *Manager) bumpRevisionLocked() {
-	m.revision.Add(1)
+func (m *Manager) bumpRevisionLocked() uint64 {
+	return m.revision.Add(1)
 }
 
 func newGeneration() string {
@@ -114,15 +136,16 @@ func newGeneration() string {
 // New creates and loads a new StonyPerms Manager.
 func New(store storage.StorageProvider) (*Manager, error) {
 	m := &Manager{
-		storage:    store,
-		engine:     engine.New(),
-		users:      make(map[uuid.UUID]*model.User),
-		nameToUUID: make(map[string]uuid.UUID),
-		groups:     make(map[string]*model.Group),
-		tracks:     make(map[string]*model.Track),
-		logs:       make([]model.LogEntry, 0),
-		stopChan:   make(chan struct{}),
-		generation: newGeneration(),
+		storage:     store,
+		engine:      engine.New(),
+		users:       make(map[uuid.UUID]*model.User),
+		nameToUUID:  make(map[string]uuid.UUID),
+		groups:      make(map[string]*model.Group),
+		tracks:      make(map[string]*model.Track),
+		logs:        make([]model.LogEntry, 0),
+		subscribers: make(map[uint64]*eventSubscriber),
+		stopChan:    make(chan struct{}),
+		generation:  newGeneration(),
 	}
 	m.revision.Store(1)
 
@@ -136,13 +159,14 @@ func New(store storage.StorageProvider) (*Manager, error) {
 	return m, nil
 }
 
-// Close stops background tasks.
+// Close stops background tasks and closes active event subscriptions.
 func (m *Manager) Close() {
 	select {
 	case <-m.stopChan:
 	default:
 		close(m.stopChan)
 	}
+	m.closeSubscribers()
 }
 
 // Engine returns the underlying calculation engine.
@@ -152,6 +176,11 @@ func (m *Manager) Engine() *engine.Engine {
 
 // Reload reloads all data from the storage provider into memory.
 func (m *Manager) Reload() error {
+	return m.ReloadWithActor("")
+}
+
+// ReloadWithActor reloads all data from storage and records an optional actor audit entry.
+func (m *Manager) ReloadWithActor(actor string) error {
 	bundle, err := m.storage.LoadAll()
 	if err != nil {
 		return fmt.Errorf("failed to load permissions data: %w", err)
@@ -169,9 +198,18 @@ func (m *Manager) Reload() error {
 			m.nameToUUID[strings.ToLower(u.Username)] = id
 		}
 	}
-	m.bumpRevisionLocked()
+	if actor != "" {
+		m.logActionLocked(actor, "general", "system", "Reloaded permissions from storage")
+	}
+	rev := m.bumpRevisionLocked()
 	m.mu.Unlock()
-	m.notifyUpdate()
+
+	m.notifyEvent(ChangeEvent{
+		Revision:  rev,
+		Type:      EventReload,
+		Actor:     actor,
+		Timestamp: time.Now().UTC().Unix(),
+	})
 
 	return nil
 }
@@ -199,6 +237,18 @@ func (m *Manager) GetUserCopy(id uuid.UUID) *model.User {
 	return copyUser(u)
 }
 
+// UserSnapshot returns a deep copy of a user together with the consistent revision.
+func (m *Manager) UserSnapshot(id uuid.UUID) (*model.User, bool, uint64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rev := m.revision.Load()
+	u, ok := m.users[id]
+	if !ok || u == nil {
+		return nil, false, rev
+	}
+	return copyUser(u), true, rev
+}
+
 // GetUserByName looks up a user by username (case-insensitive) or UUID string.
 func (m *Manager) GetUserByName(query string) *model.User {
 	query = strings.TrimSpace(query)
@@ -217,22 +267,94 @@ func (m *Manager) GetUserByName(query string) *model.User {
 
 // GetUserByNameCopy is the copy-returning variant used by command handlers.
 func (m *Manager) GetUserByNameCopy(query string) *model.User {
+	u, ok, _ := m.ResolveUserByName(query)
+	if !ok {
+		return nil
+	}
+	return u
+}
+
+// ResolveUserByName looks up a user by case-insensitive username or UUID string
+// and returns a deep copy plus the consistent revision.
+func (m *Manager) ResolveUserByName(query string) (*model.User, bool, uint64) {
 	query = strings.TrimSpace(query)
 	if id, err := uuid.Parse(query); err == nil {
-		return m.GetUserCopy(id)
+		return m.UserSnapshot(id)
 	}
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	rev := m.revision.Load()
 
 	if id, ok := m.nameToUUID[strings.ToLower(query)]; ok {
-		u := m.users[id]
-		if u == nil {
-			return nil
+		if u := m.users[id]; u != nil {
+			return copyUser(u), true, rev
 		}
-		return copyUser(u)
 	}
-	return nil
+	return nil, false, rev
+}
+
+// ListUsers returns deterministically sorted user copies matching groupFilter with pagination.
+func (m *Manager) ListUsers(groupFilter string, offset, limit int) ([]*model.User, int, uint64) {
+	groupFilter = strings.ToLower(strings.TrimSpace(groupFilter))
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rev := m.revision.Load()
+	now := time.Now()
+
+	matched := make([]*model.User, 0, len(m.users))
+	for _, u := range m.users {
+		if u == nil {
+			continue
+		}
+		if groupFilter != "" && !userInGroup(u, groupFilter, now) {
+			continue
+		}
+		matched = append(matched, u)
+	}
+
+	sort.SliceStable(matched, func(i, j int) bool {
+		li := strings.ToLower(matched[i].Username)
+		lj := strings.ToLower(matched[j].Username)
+		if li != lj {
+			return li < lj
+		}
+		return matched[i].UUID.String() < matched[j].UUID.String()
+	})
+
+	total := len(matched)
+	if offset >= total {
+		return make([]*model.User, 0), total, rev
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+
+	res := make([]*model.User, 0, end-offset)
+	for _, u := range matched[offset:end] {
+		res = append(res, copyUser(u))
+	}
+	return res, total, rev
+}
+
+func userInGroup(u *model.User, groupName string, now time.Time) bool {
+	if strings.EqualFold(u.PrimaryGroup, groupName) {
+		return true
+	}
+	for _, p := range u.Parents {
+		if strings.EqualFold(p.Group, groupName) && !p.IsExpired(now) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetOrCreateUser retrieves an existing user or creates a new one with the given UUID and name.
@@ -241,13 +363,22 @@ func (m *Manager) GetOrCreateUser(id uuid.UUID, username string) *model.User {
 	if u, ok := m.users[id]; ok {
 		if username != "" && u.Username != username {
 			cp := copyUser(u)
+			if u.Username != "" && !strings.EqualFold(u.Username, username) {
+				delete(m.nameToUUID, strings.ToLower(u.Username))
+			}
 			cp.Username = username
 			m.users[id] = cp
 			m.nameToUUID[strings.ToLower(username)] = id
-			m.bumpRevisionLocked()
+			rev := m.bumpRevisionLocked()
 			m.mu.Unlock()
 			_ = m.storage.SaveUser(cp)
-			m.notifyUpdate()
+			m.notifyEvent(ChangeEvent{
+				Revision:  rev,
+				Type:      EventUserUpdated,
+				UUID:      id.String(),
+				Username:  cp.Username,
+				Timestamp: time.Now().UTC().Unix(),
+			})
 			return cp
 		}
 		m.mu.Unlock()
@@ -259,11 +390,17 @@ func (m *Manager) GetOrCreateUser(id uuid.UUID, username string) *model.User {
 	if username != "" {
 		m.nameToUUID[strings.ToLower(username)] = id
 	}
-	m.bumpRevisionLocked()
+	rev := m.bumpRevisionLocked()
 	m.mu.Unlock()
 
 	_ = m.storage.SaveUser(u)
-	m.notifyUpdate()
+	m.notifyEvent(ChangeEvent{
+		Revision:  rev,
+		Type:      EventUserUpdated,
+		UUID:      id.String(),
+		Username:  username,
+		Timestamp: time.Now().UTC().Unix(),
+	})
 	return u
 }
 
@@ -271,30 +408,56 @@ func (m *Manager) GetOrCreateUser(id uuid.UUID, username string) *model.User {
 // The in-memory publication and revision bump happen under one write lock.
 func (m *Manager) SaveUser(user *model.User) error {
 	m.mu.Lock()
+	if old, ok := m.users[user.UUID]; ok && old != nil && old.Username != "" && !strings.EqualFold(old.Username, user.Username) {
+		delete(m.nameToUUID, strings.ToLower(old.Username))
+	}
 	m.users[user.UUID] = user
 	if user.Username != "" {
 		m.nameToUUID[strings.ToLower(user.Username)] = user.UUID
 	}
-	m.bumpRevisionLocked()
+	rev := m.bumpRevisionLocked()
 	m.mu.Unlock()
 
 	err := m.storage.SaveUser(user)
-	m.notifyUpdate()
+	m.notifyEvent(ChangeEvent{
+		Revision:  rev,
+		Type:      EventUserUpdated,
+		UUID:      user.UUID.String(),
+		Username:  user.Username,
+		Timestamp: time.Now().UTC().Unix(),
+	})
 	return err
 }
 
 // DeleteUser deletes a user from memory and storage.
 func (m *Manager) DeleteUser(id uuid.UUID) error {
 	m.mu.Lock()
+	var rev uint64
+	var username string
+	deleted := false
 	if u, ok := m.users[id]; ok {
-		delete(m.nameToUUID, strings.ToLower(u.Username))
+		username = u.Username
+		if u.Username != "" {
+			delete(m.nameToUUID, strings.ToLower(u.Username))
+		}
 		delete(m.users, id)
-		m.bumpRevisionLocked()
+		rev = m.bumpRevisionLocked()
+		deleted = true
 	}
 	m.mu.Unlock()
 
 	err := m.storage.DeleteUser(id)
-	m.notifyUpdate()
+	if deleted {
+		m.notifyEvent(ChangeEvent{
+			Revision:  rev,
+			Type:      EventUserDeleted,
+			UUID:      id.String(),
+			Username:  username,
+			Timestamp: time.Now().UTC().Unix(),
+		})
+	} else {
+		m.notifyUpdate()
+	}
 	return err
 }
 
@@ -349,29 +512,45 @@ func (m *Manager) CreateGroup(name string, weight int, displayName string) (*mod
 	g := model.NewGroup(name, weight)
 	g.DisplayName = displayName
 	m.groups[name] = g
-	m.bumpRevisionLocked()
+	rev := m.bumpRevisionLocked()
 	m.mu.Unlock()
 
 	// The group remains visible with its new revision if persistence fails;
 	// this keeps the version consistent with the published state.
 	if err := m.storage.SaveGroup(g); err != nil {
-		m.notifyUpdate()
+		m.notifyEvent(ChangeEvent{
+			Revision:  rev,
+			Type:      EventGroupUpdated,
+			Group:     name,
+			Timestamp: time.Now().UTC().Unix(),
+		})
 		return nil, err
 	}
-	m.notifyUpdate()
+	m.notifyEvent(ChangeEvent{
+		Revision:  rev,
+		Type:      EventGroupUpdated,
+		Group:     name,
+		Timestamp: time.Now().UTC().Unix(),
+	})
 	return g, nil
 }
 
 // SaveGroup persists a group to storage. Publication and revision bump happen
 // under one write lock.
 func (m *Manager) SaveGroup(group *model.Group) error {
+	name := strings.ToLower(group.Name)
 	m.mu.Lock()
-	m.groups[strings.ToLower(group.Name)] = group
-	m.bumpRevisionLocked()
+	m.groups[name] = group
+	rev := m.bumpRevisionLocked()
 	m.mu.Unlock()
 
 	err := m.storage.SaveGroup(group)
-	m.notifyUpdate()
+	m.notifyEvent(ChangeEvent{
+		Revision:  rev,
+		Type:      EventGroupUpdated,
+		Group:     name,
+		Timestamp: time.Now().UTC().Unix(),
+	})
 	return err
 }
 
@@ -383,14 +562,26 @@ func (m *Manager) DeleteGroup(name string) error {
 	}
 
 	m.mu.Lock()
+	var rev uint64
+	deleted := false
 	if _, ok := m.groups[name]; ok {
 		delete(m.groups, name)
-		m.bumpRevisionLocked()
+		rev = m.bumpRevisionLocked()
+		deleted = true
 	}
 	m.mu.Unlock()
 
 	err := m.storage.DeleteGroup(name)
-	m.notifyUpdate()
+	if deleted {
+		m.notifyEvent(ChangeEvent{
+			Revision:  rev,
+			Type:      EventGroupDeleted,
+			Group:     name,
+			Timestamp: time.Now().UTC().Unix(),
+		})
+	} else {
+		m.notifyUpdate()
+	}
 	return err
 }
 
@@ -414,6 +605,74 @@ func (m *Manager) GetGroupMembers(groupName string) []*model.User {
 		}
 	}
 	return members
+}
+
+// GroupMembersSnapshot returns active (non-expired) members of groupName together
+// with the consistent revision. Returns found=false if groupName does not exist.
+func (m *Manager) GroupMembersSnapshot(groupName string) ([]GroupMemberInfo, bool, uint64) {
+	groupName = strings.ToLower(strings.TrimSpace(groupName))
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rev := m.revision.Load()
+
+	if _, ok := m.groups[groupName]; !ok {
+		return nil, false, rev
+	}
+
+	now := time.Now()
+	members := make([]GroupMemberInfo, 0)
+	for _, u := range m.users {
+		if u == nil {
+			continue
+		}
+		if strings.EqualFold(u.PrimaryGroup, groupName) {
+			members = append(members, GroupMemberInfo{
+				UUID:         u.UUID,
+				Username:     u.Username,
+				PrimaryGroup: u.PrimaryGroup,
+				Permanent:    true,
+			})
+			continue
+		}
+		var best *model.Inheritance
+		for i := range u.Parents {
+			p := u.Parents[i]
+			if !strings.EqualFold(p.Group, groupName) || p.IsExpired(now) {
+				continue
+			}
+			if best == nil || (p.Expiry <= 0 && best.Expiry > 0) || (best.Expiry > 0 && p.Expiry > best.Expiry) {
+				cp := p
+				best = &cp
+			}
+		}
+		if best != nil {
+			var ctxs map[string]string
+			if len(best.Contexts) > 0 {
+				ctxs = make(map[string]string, len(best.Contexts))
+				for k, v := range best.Contexts {
+					ctxs[k] = v
+				}
+			}
+			members = append(members, GroupMemberInfo{
+				UUID:         u.UUID,
+				Username:     u.Username,
+				PrimaryGroup: u.PrimaryGroup,
+				Permanent:    best.Expiry <= 0,
+				Expiry:       best.Expiry,
+				Contexts:     ctxs,
+			})
+		}
+	}
+
+	sort.SliceStable(members, func(i, j int) bool {
+		li := strings.ToLower(members[i].Username)
+		lj := strings.ToLower(members[j].Username)
+		if li != lj {
+			return li < lj
+		}
+		return members[i].UUID.String() < members[j].UUID.String()
+	})
+	return members, true, rev
 }
 
 // -----------------------------------------------------------------------------
@@ -450,6 +709,35 @@ func (m *Manager) GetTracks() []*model.Track {
 	return res
 }
 
+// TracksSnapshot returns deterministically sorted deep copies of all tracks and the revision.
+func (m *Manager) TracksSnapshot() ([]*model.Track, uint64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rev := m.revision.Load()
+
+	res := make([]*model.Track, 0, len(m.tracks))
+	for _, t := range m.tracks {
+		res = append(res, copyTrack(t))
+	}
+	sort.SliceStable(res, func(i, j int) bool {
+		return res[i].Name < res[j].Name
+	})
+	return res, rev
+}
+
+// TrackSnapshot returns a deep copy of a single track and the revision.
+func (m *Manager) TrackSnapshot(name string) (*model.Track, bool, uint64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rev := m.revision.Load()
+
+	t, ok := m.tracks[strings.ToLower(strings.TrimSpace(name))]
+	if !ok || t == nil {
+		return nil, false, rev
+	}
+	return copyTrack(t), true, rev
+}
+
 // CreateTrack creates a new track.
 func (m *Manager) CreateTrack(name string) (*model.Track, error) {
 	name = strings.ToLower(strings.TrimSpace(name))
@@ -458,67 +746,137 @@ func (m *Manager) CreateTrack(name string) (*model.Track, error) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if _, exists := m.tracks[name]; exists {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("track '%s' already exists", name)
 	}
 
 	t := model.NewTrack(name)
 	m.tracks[name] = t
+	rev := m.bumpRevisionLocked()
+	m.mu.Unlock()
 
 	if err := m.storage.SaveTrack(t); err != nil {
+		m.notifyEvent(ChangeEvent{
+			Revision:  rev,
+			Type:      EventTrackUpdated,
+			Track:     name,
+			Timestamp: time.Now().UTC().Unix(),
+		})
 		return nil, err
 	}
+	m.notifyEvent(ChangeEvent{
+		Revision:  rev,
+		Type:      EventTrackUpdated,
+		Track:     name,
+		Timestamp: time.Now().UTC().Unix(),
+	})
 	return t, nil
 }
 
 // SaveTrack persists a track.
 func (m *Manager) SaveTrack(track *model.Track) error {
+	name := strings.ToLower(track.Name)
 	m.mu.Lock()
-	m.tracks[strings.ToLower(track.Name)] = track
+	m.tracks[name] = track
+	rev := m.bumpRevisionLocked()
 	m.mu.Unlock()
 
-	return m.storage.SaveTrack(track)
+	err := m.storage.SaveTrack(track)
+	m.notifyEvent(ChangeEvent{
+		Revision:  rev,
+		Type:      EventTrackUpdated,
+		Track:     name,
+		Timestamp: time.Now().UTC().Unix(),
+	})
+	return err
 }
 
 // DeleteTrack removes a track.
 func (m *Manager) DeleteTrack(name string) error {
 	name = strings.ToLower(strings.TrimSpace(name))
 	m.mu.Lock()
-	delete(m.tracks, name)
+	var rev uint64
+	deleted := false
+	if _, ok := m.tracks[name]; ok {
+		delete(m.tracks, name)
+		rev = m.bumpRevisionLocked()
+		deleted = true
+	}
 	m.mu.Unlock()
 
-	return m.storage.DeleteTrack(name)
+	err := m.storage.DeleteTrack(name)
+	if deleted {
+		m.notifyEvent(ChangeEvent{
+			Revision:  rev,
+			Type:      EventTrackDeleted,
+			Track:     name,
+			Timestamp: time.Now().UTC().Unix(),
+		})
+	} else {
+		m.notifyUpdate()
+	}
+	return err
 }
 
 // PromoteUser promotes a user along a track.
 func (m *Manager) PromoteUser(user *model.User, trackName string, actor string) (string, string, error) {
-	track := m.GetTrack(trackName)
-	if track == nil {
-		return "", "", fmt.Errorf("track '%s' does not exist", trackName)
+	if user == nil {
+		return "", "", ErrUserNotFound
 	}
-	if len(track.Groups) == 0 {
-		return "", "", fmt.Errorf("track '%s' contains no groups", trackName)
+	_, from, to, _, err := m.stepUserOnTrack(user.UUID, trackName, actor, true)
+	return from, to, err
+}
+
+// DemoteUser demotes a user along a track.
+func (m *Manager) DemoteUser(user *model.User, trackName string, actor string) (string, string, error) {
+	if user == nil {
+		return "", "", ErrUserNotFound
 	}
+	_, from, to, _, err := m.stepUserOnTrack(user.UUID, trackName, actor, false)
+	return from, to, err
+}
+
+// PromoteUserByID promotes a user by UUID and returns a deep copy plus the new revision.
+func (m *Manager) PromoteUserByID(id uuid.UUID, trackName string, actor string) (*model.User, string, string, uint64, error) {
+	return m.stepUserOnTrack(id, trackName, actor, true)
+}
+
+// DemoteUserByID demotes a user by UUID and returns a deep copy plus the new revision.
+func (m *Manager) DemoteUserByID(id uuid.UUID, trackName string, actor string) (*model.User, string, string, uint64, error) {
+	return m.stepUserOnTrack(id, trackName, actor, false)
+}
+
+func (m *Manager) stepUserOnTrack(id uuid.UUID, trackName string, actor string, promote bool) (*model.User, string, string, uint64, error) {
+	trackKey := strings.ToLower(strings.TrimSpace(trackName))
 
 	m.mu.Lock()
-	target, ok := m.users[user.UUID]
-	if !ok || target == nil {
+	track := m.tracks[trackKey]
+	if track == nil {
+		rev := m.revision.Load()
 		m.mu.Unlock()
-		return "", "", fmt.Errorf("user record not found")
+		return nil, "", "", rev, fmt.Errorf("%w: %s", ErrTrackNotFound, trackName)
+	}
+	if len(track.Groups) == 0 {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, "", "", rev, fmt.Errorf("%w: %s", ErrTrackEmpty, trackName)
+	}
+
+	target, ok := m.users[id]
+	if !ok || target == nil {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, "", "", rev, ErrUserNotFound
 	}
 	updated := copyUser(target)
 
-	// Find user's current highest group on this track
 	currentGroup := ""
 	for _, gName := range track.Groups {
-		// Check primary group
 		if strings.EqualFold(updated.PrimaryGroup, gName) {
 			currentGroup = gName
 			continue
 		}
-		// Check parents
 		for _, p := range updated.Parents {
 			if strings.EqualFold(p.Group, gName) {
 				currentGroup = gName
@@ -527,87 +885,65 @@ func (m *Manager) PromoteUser(user *model.User, trackName string, actor string) 
 		}
 	}
 
-	nextGroup, ok := track.NextGroup(currentGroup)
-	if !ok {
-		if currentGroup != "" {
-			m.mu.Unlock()
-			return currentGroup, "", fmt.Errorf("user is already at the highest group on track '%s'", trackName)
+	var nextGroup string
+	if promote {
+		var ok bool
+		nextGroup, ok = track.NextGroup(currentGroup)
+		if !ok {
+			if currentGroup != "" {
+				rev := m.revision.Load()
+				m.mu.Unlock()
+				return nil, currentGroup, "", rev, fmt.Errorf("%w: %s", ErrTrackTop, trackName)
+			}
+			nextGroup = track.Groups[0]
 		}
-		nextGroup = track.Groups[0]
+	} else {
+		if currentGroup == "" {
+			rev := m.revision.Load()
+			m.mu.Unlock()
+			return nil, "", "", rev, fmt.Errorf("%w: %s", ErrNotOnTrack, trackName)
+		}
+		var ok bool
+		nextGroup, ok = track.PreviousGroup(currentGroup)
+		if !ok {
+			rev := m.revision.Load()
+			m.mu.Unlock()
+			return nil, currentGroup, "", rev, fmt.Errorf("%w: %s", ErrTrackBottom, trackName)
+		}
 	}
 
-	// Apply promotion: remove old track groups, set new group
 	if currentGroup != "" {
 		updated.RemoveParent(currentGroup, nil)
 	}
 	updated.AddParent(model.NewInheritance(nextGroup))
 	updated.PrimaryGroup = nextGroup
 
-	m.users[updated.UUID] = updated
-	m.bumpRevisionLocked()
-	_ = m.storage.SaveUser(updated)
-	m.logActionLocked(actor, "user", updated.Username, fmt.Sprintf("Promoted along track '%s' (%s -> %s)", trackName, currentGroup, nextGroup))
-	m.mu.Unlock()
-	m.notifyUpdate()
-
-	return currentGroup, nextGroup, nil
-}
-
-// DemoteUser demotes a user along a track.
-func (m *Manager) DemoteUser(user *model.User, trackName string, actor string) (string, string, error) {
-	track := m.GetTrack(trackName)
-	if track == nil {
-		return "", "", fmt.Errorf("track '%s' does not exist", trackName)
-	}
-	if len(track.Groups) == 0 {
-		return "", "", fmt.Errorf("track '%s' contains no groups", trackName)
-	}
-
-	m.mu.Lock()
-	target, ok := m.users[user.UUID]
-	if !ok || target == nil {
+	if err := m.storage.SaveUser(updated); err != nil {
+		rev := m.revision.Load()
 		m.mu.Unlock()
-		return "", "", fmt.Errorf("user record not found")
+		return nil, "", "", rev, err
 	}
-	updated := copyUser(target)
-
-	currentGroup := ""
-	for _, gName := range track.Groups {
-		if strings.EqualFold(updated.PrimaryGroup, gName) {
-			currentGroup = gName
-			continue
-		}
-		for _, p := range updated.Parents {
-			if strings.EqualFold(p.Group, gName) {
-				currentGroup = gName
-				break
-			}
-		}
-	}
-
-	if currentGroup == "" {
-		m.mu.Unlock()
-		return "", "", fmt.Errorf("user is not on track '%s'", trackName)
-	}
-
-	prevGroup, ok := track.PreviousGroup(currentGroup)
-	if !ok {
-		m.mu.Unlock()
-		return currentGroup, "", fmt.Errorf("user is already at the lowest group on track '%s'", trackName)
-	}
-
-	updated.RemoveParent(currentGroup, nil)
-	updated.AddParent(model.NewInheritance(prevGroup))
-	updated.PrimaryGroup = prevGroup
 
 	m.users[updated.UUID] = updated
-	m.bumpRevisionLocked()
-	_ = m.storage.SaveUser(updated)
-	m.logActionLocked(actor, "user", updated.Username, fmt.Sprintf("Demoted along track '%s' (%s -> %s)", trackName, currentGroup, prevGroup))
+	rev := m.bumpRevisionLocked()
+	verb := "Demoted"
+	if promote {
+		verb = "Promoted"
+	}
+	m.logActionLocked(actor, "user", userLogTarget(updated), fmt.Sprintf("%s along track '%s' (%s -> %s)", verb, trackName, currentGroup, nextGroup))
+	ret := copyUser(updated)
 	m.mu.Unlock()
-	m.notifyUpdate()
 
-	return currentGroup, prevGroup, nil
+	m.notifyEvent(ChangeEvent{
+		Revision:  rev,
+		Type:      EventUserUpdated,
+		UUID:      updated.UUID.String(),
+		Username:  updated.Username,
+		Actor:     actor,
+		Timestamp: time.Now().UTC().Unix(),
+	})
+
+	return ret, currentGroup, nextGroup, rev, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -712,8 +1048,38 @@ func (m *Manager) EffectiveUser(id uuid.UUID, contexts map[string]string, defaul
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	revision := m.revision.Load()
-
 	now := time.Now()
+
+	eff, found := m.effectiveUserLocked(id, contexts, defaultGroup, now)
+	return eff, found, revision
+}
+
+// EffectiveUsersBatch resolves multiple users under a single read lock for
+// snapshot consistency at one revision.
+func (m *Manager) EffectiveUsersBatch(ids []uuid.UUID, contexts map[string]string, defaultGroup string) (map[uuid.UUID]*EffectiveUser, map[uuid.UUID]bool, uint64) {
+	if defaultGroup == "" {
+		defaultGroup = "default"
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	revision := m.revision.Load()
+	now := time.Now()
+
+	effs := make(map[uuid.UUID]*EffectiveUser, len(ids))
+	foundMap := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		if _, seen := effs[id]; seen {
+			continue
+		}
+		eff, found := m.effectiveUserLocked(id, contexts, defaultGroup, now)
+		effs[id] = eff
+		foundMap[id] = found
+	}
+	return effs, foundMap, revision
+}
+
+func (m *Manager) effectiveUserLocked(id uuid.UUID, contexts map[string]string, defaultGroup string, now time.Time) (*EffectiveUser, bool) {
 	user, found := m.users[id]
 	if !found {
 		user = model.NewUser(id, "")
@@ -784,7 +1150,7 @@ func (m *Manager) EffectiveUser(id uuid.UUID, contexts map[string]string, defaul
 	eff.Prefix = m.engine.GetPrefix(user, m.groups, contexts)
 	eff.Suffix = m.engine.GetSuffix(user, m.groups, contexts)
 
-	return eff, found, revision
+	return eff, found
 }
 
 // EvaluateUser evaluates a single permission with the authoritative engine and
@@ -945,15 +1311,49 @@ func (m *Manager) logActionLocked(actor, targetType, target, action string) {
 	_ = m.storage.AppendLog(entry)
 }
 
-// GetLogs returns audit action logs up to limit.
+// GetLogs returns copied audit action logs up to limit (chronological order).
 func (m *Manager) GetLogs(limit int) []model.LogEntry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if limit > 0 && len(m.logs) > limit {
-		return m.logs[len(m.logs)-limit:]
+	src := m.logs
+	if limit > 0 && len(src) > limit {
+		src = src[len(src)-limit:]
 	}
-	return m.logs
+	out := make([]model.LogEntry, len(src))
+	copy(out, src)
+	return out
+}
+
+// QueryLogs returns matching audit logs newest-first up to limit together with
+// the current revision.
+func (m *Manager) QueryLogs(limit int, targetType, target, actor string) ([]model.LogEntry, uint64) {
+	targetType = strings.ToLower(strings.TrimSpace(targetType))
+	target = strings.ToLower(strings.TrimSpace(target))
+	actor = strings.ToLower(strings.TrimSpace(actor))
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rev := m.revision.Load()
+
+	out := make([]model.LogEntry, 0)
+	for i := len(m.logs) - 1; i >= 0; i-- {
+		entry := m.logs[i]
+		if targetType != "" && !strings.EqualFold(entry.TargetType, targetType) {
+			continue
+		}
+		if target != "" && !strings.EqualFold(entry.Target, target) {
+			continue
+		}
+		if actor != "" && !strings.EqualFold(entry.Actor, actor) {
+			continue
+		}
+		out = append(out, entry)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, rev
 }
 
 // Stats returns high-level diagnostic statistics.
@@ -1001,12 +1401,17 @@ func (m *Manager) cleanupExpired(now time.Time) {
 			changed = true
 		}
 	}
+	var rev uint64
 	if changed {
-		m.bumpRevisionLocked()
+		rev = m.bumpRevisionLocked()
 	}
 	m.mu.Unlock()
 
 	if changed {
-		m.notifyUpdate()
+		m.notifyEvent(ChangeEvent{
+			Revision:  rev,
+			Type:      EventExpiryCleanup,
+			Timestamp: now.UTC().Unix(),
+		})
 	}
 }
