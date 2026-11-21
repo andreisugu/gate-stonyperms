@@ -147,7 +147,7 @@ func stripColor(s string) string {
 	return sb.String()
 }
 
-// Header formats a LuckPerms-style section header fitting Minecraft's standard chat width (~48-52 chars).
+// Header formats a centered section header fitting Minecraft's standard chat width (~48-52 chars).
 func Header(title string) string {
 	visibleLen := len(stripColor(title))
 	paddingLen := (48 - visibleLen - 2) / 2

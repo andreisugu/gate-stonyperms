@@ -19,7 +19,7 @@ func HandleRoot(mgr *manager.Manager, src command.Source) error {
 	return HandleHelp(mgr, src, nil)
 }
 
-// HandleHelp displays paginated, comprehensive LuckPerms-style command documentation with clickable commands.
+// HandleHelp displays paginated, comprehensive command documentation with clickable commands.
 func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
 	page := 1
 	if len(args) > 0 {

@@ -13,11 +13,16 @@
     expandedTracks: {},
     sidebarQuery: '',
     nodesFilter: '',
+    nodeTypeFilter: 'ALL', // 'ALL' | 'PERMISSION' | 'INHERITANCE' | 'AFFIX' | 'META'
+    showInherited: false,
+    sortBy: 'default', // 'default' | 'key' | 'value' | 'expiry' | 'contexts'
+    sortDir: 1,
     checkedRows: new Set(),
     dirtyCount: 0,
     deletedGroups: new Set(),
     deletedTracks: new Set(),
     deletedUsers: new Set(),
+    pendingTrackModal: '',
     addForm: {
       type: 'PERMISSION',
       key: '',
@@ -77,6 +82,156 @@
     img.onerror = null;
     img.src = fallbackHeadSvg(img.dataset.name);
   };
+
+  /* ==================== Minecraft Color Preview Renderer ==================== */
+
+  const MC_COLORS = {
+    '0': '#000000', '1': '#0000aa', '2': '#00aa00', '3': '#00aaaa',
+    '4': '#aa0000', '5': '#aa00aa', '6': '#ffaa00', '7': '#aaaaaa',
+    '8': '#555555', '9': '#5555ff', 'a': '#55ff55', 'b': '#55ffff',
+    'c': '#ff5555', 'd': '#ff55ff', 'e': '#ffff55', 'f': '#ffffff'
+  };
+
+  const MC_TAG_NAMES = {
+    black: '#000000', dark_blue: '#0000aa', dark_green: '#00aa00', dark_aqua: '#00aaaa',
+    dark_red: '#aa0000', dark_purple: '#aa00aa', gold: '#ffaa00', gray: '#aaaaaa', grey: '#aaaaaa',
+    dark_gray: '#555555', dark_grey: '#555555', blue: '#5555ff', green: '#55ff55',
+    aqua: '#55ffff', red: '#ff5555', light_purple: '#ff55ff', pink: '#ff55ff',
+    yellow: '#ffff55', white: '#ffffff'
+  };
+
+  function renderMcText(raw) {
+    const s = String(raw || '');
+    if (!s) return '';
+    let color = '';
+    const stack = [];
+    let bold = false, italic = false, under = false, strike = false;
+    let out = '';
+    let buf = '';
+
+    const activeColor = () => color || (stack.length ? stack[stack.length - 1] : '');
+    const flush = () => {
+      if (!buf) return;
+      const styles = [];
+      const col = activeColor();
+      if (col) styles.push('color:' + col);
+      if (bold) styles.push('font-weight:700');
+      if (italic) styles.push('font-style:italic');
+      if (under || strike) styles.push('text-decoration:' + [under ? 'underline' : '', strike ? 'line-through' : ''].filter(Boolean).join(' '));
+      out += styles.length ? `<span style="${styles.join(';')}">${esc(buf)}</span>` : esc(buf);
+      buf = '';
+    };
+
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if ((ch === '&' || ch === '§') && i + 1 < s.length) {
+        if (s[i + 1] === '#' && /^#[0-9a-fA-F]{6}/.test(s.slice(i + 1, i + 8))) {
+          flush();
+          color = s.slice(i + 1, i + 8);
+          i += 7;
+          continue;
+        }
+        const code = s[i + 1].toLowerCase();
+        if (MC_COLORS[code]) {
+          flush();
+          color = MC_COLORS[code];
+          bold = italic = under = strike = false;
+          i++;
+          continue;
+        }
+        if (code === 'l') { flush(); bold = true; i++; continue; }
+        if (code === 'o') { flush(); italic = true; i++; continue; }
+        if (code === 'n') { flush(); under = true; i++; continue; }
+        if (code === 'm') { flush(); strike = true; i++; continue; }
+        if (code === 'r') { flush(); color = ''; bold = italic = under = strike = false; i++; continue; }
+      }
+      if (ch === '<') {
+        const end = s.indexOf('>', i + 1);
+        if (end > i) {
+          const tag = s.slice(i + 1, end).trim().toLowerCase();
+          if (tag === 'b' || tag === 'bold') { flush(); bold = true; i = end; continue; }
+          if (tag === '/b' || tag === '/bold') { flush(); bold = false; i = end; continue; }
+          if (tag === 'i' || tag === 'italic') { flush(); italic = true; i = end; continue; }
+          if (tag === '/i' || tag === '/italic') { flush(); italic = false; i = end; continue; }
+          if (tag === 'u' || tag === 'underlined') { flush(); under = true; i = end; continue; }
+          if (tag === '/u' || tag === '/underlined') { flush(); under = false; i = end; continue; }
+          if (tag === 's' || tag === 'st' || tag === 'strikethrough') { flush(); strike = true; i = end; continue; }
+          if (tag === '/s' || tag === '/st' || tag === '/strikethrough') { flush(); strike = false; i = end; continue; }
+          if (tag === 'reset' || tag === 'r') { flush(); color = ''; stack.length = 0; bold = italic = under = strike = false; i = end; continue; }
+          if (tag.startsWith('/')) {
+            const inner = tag.slice(1);
+            if (MC_TAG_NAMES[inner] || inner.startsWith('#') || inner === 'color') {
+              flush();
+              stack.pop();
+              color = '';
+              i = end;
+              continue;
+            }
+          } else {
+            const spec = tag.startsWith('color:') ? tag.slice(6) : tag;
+            if (/^#[0-9a-f]{6}$/.test(spec)) {
+              flush(); stack.push(spec); color = ''; i = end; continue;
+            }
+            if (MC_TAG_NAMES[spec]) {
+              flush(); stack.push(MC_TAG_NAMES[spec]); color = ''; i = end; continue;
+            }
+          }
+        }
+      }
+      buf += ch;
+    }
+    flush();
+    return out;
+  }
+
+  function resolveEntityPreview(entity, kind) {
+    const groupsByName = Object.fromEntries((STATE.editor?.groups || []).map(g => [g.name.toLowerCase(), g]));
+    const pickBestAffix = list => {
+      const active = (list || []).filter(a => !a.expiry || a.expiry > Math.floor(Date.now() / 1000));
+      const globalFirst = active.slice().sort((a, b) => {
+        const aCtx = a.contexts && Object.keys(a.contexts).length ? 1 : 0;
+        const bCtx = b.contexts && Object.keys(b.contexts).length ? 1 : 0;
+        return aCtx - bCtx || (b.priority || 0) - (a.priority || 0);
+      });
+      return globalFirst[0]?.value || '';
+    };
+
+    if (kind === 'group') {
+      const pref = pickBestAffix(entity.prefixes);
+      const suff = pickBestAffix(entity.suffixes);
+      const label = entity.displayName || entity.name;
+      return renderMcText(pref + label + suff);
+    }
+
+    const inherited = collectInheritedGroups(entity);
+    const allGroups = [];
+    if (entity.primaryGroup && groupsByName[entity.primaryGroup.toLowerCase()]) {
+      allGroups.push(groupsByName[entity.primaryGroup.toLowerCase()]);
+    }
+    inherited.forEach(g => {
+      if (!allGroups.some(x => x.name === g.name)) allGroups.push(g);
+    });
+    allGroups.sort((a, b) => (b.weight || 0) - (a.weight || 0));
+
+    let pref = pickBestAffix(entity.prefixes);
+    if (!pref) {
+      for (const g of allGroups) {
+        pref = pickBestAffix(g.prefixes);
+        if (pref) break;
+      }
+    }
+    let suff = pickBestAffix(entity.suffixes);
+    if (!suff) {
+      for (const g of allGroups) {
+        suff = pickBestAffix(g.suffixes);
+        if (suff) break;
+      }
+    }
+    const name = (entity.meta && entity.meta.nickname) || entity.username || entity.uuid;
+    return renderMcText(pref + name + suff);
+  }
+
+  /* ==================== Encoding / Routing Helpers ==================== */
 
   function bytesToBase64Url(bytes) {
     let bin = '';
@@ -242,6 +397,11 @@
     return 'in ' + formatDuration(rem);
   }
 
+  function contextsToInputString(ctxs) {
+    if (!ctxs || !Object.keys(ctxs).length) return '';
+    return Object.entries(ctxs).map(([k, v]) => `${k}=${v}`).join(' ');
+  }
+
   function parseContextsString(raw) {
     const s = String(raw || '').trim();
     if (!s || s === 'none') return undefined;
@@ -282,6 +442,7 @@
     STATE.deletedTracks.clear();
     STATE.deletedUsers.clear();
     STATE.checkedRows.clear();
+    STATE.pendingTrackModal = '';
 
     const effectiveTarget = targetHint || (data.metadata && data.metadata.targetType && data.metadata.target ? `${data.metadata.targetType}:${data.metadata.target}` : '');
     if (effectiveTarget.startsWith('group:')) {
@@ -291,6 +452,13 @@
       const uid = effectiveTarget.slice(5).toLowerCase();
       const hit = data.users.find(u => u.uuid.toLowerCase() === uid || (u.username || '').toLowerCase() === uid);
       if (hit) STATE.selected = { type: 'user', id: hit.uuid };
+    } else if (effectiveTarget.startsWith('track:')) {
+      const tn = effectiveTarget.slice(6).toLowerCase();
+      if (data.tracks.some(t => t.name === tn)) {
+        STATE.expandedTracks[tn] = true;
+        STATE.pendingTrackModal = tn;
+      }
+      STATE.selected = null;
     } else {
       STATE.selected = null;
     }
@@ -324,44 +492,70 @@
     return STATE.editor.users.find(u => u.uuid === STATE.selected.id) || null;
   }
 
-  // Flatten entity properties/nodes into unified LuckPerms-style rows
+  function collectInheritedGroups(entity) {
+    if (!STATE.editor || !entity) return [];
+    const groupsByName = Object.fromEntries(STATE.editor.groups.map(g => [g.name.toLowerCase(), g]));
+    const visited = new Set();
+    if (entity.name) visited.add(entity.name.toLowerCase());
+    const queue = [];
+    if (entity.primaryGroup) queue.push(entity.primaryGroup.toLowerCase());
+    (entity.parents || []).forEach(p => queue.push(String(p.group || '').toLowerCase()));
+
+    const out = [];
+    while (queue.length) {
+      const curName = queue.shift();
+      if (!curName || visited.has(curName)) continue;
+      visited.add(curName);
+      const grp = groupsByName[curName];
+      if (!grp) continue;
+      out.push(grp);
+      (grp.parents || []).forEach(p => queue.push(String(p.group || '').toLowerCase()));
+    }
+    out.sort((a, b) => (b.weight || 0) - (a.weight || 0) || a.name.localeCompare(b.name));
+    return out;
+  }
+
+  // Flatten entity properties/nodes into normalized editor rows
   function buildUnifiedRows(entity, kind) {
     const rows = [];
     if (kind === 'group') {
       if (entity.displayName) {
         rows.push({
-          rowId: 'displayname:0', badge: 'DISPLAY NAME', cls: 'type-displayname',
-          key: entity.displayName, value: true, toggleable: false, expiry: 0, contexts: null,
+          rowId: 'displayname:0', category: 'META', badge: 'DISPLAY NAME', cls: 'type-displayname',
+          key: entity.displayName, rawKey: entity.displayName, value: true, toggleable: false, editable: true,
+          expiry: 0, contexts: null,
           onDelete: () => { entity.displayName = ''; markDirty(); }
         });
       }
       if (typeof entity.weight === 'number' && entity.weight !== 0) {
         rows.push({
-          rowId: 'weight:0', badge: 'WEIGHT', cls: 'type-weight',
-          key: String(entity.weight), value: true, toggleable: false, expiry: 0, contexts: null,
+          rowId: 'weight:0', category: 'META', badge: 'WEIGHT', cls: 'type-weight',
+          key: String(entity.weight), rawKey: String(entity.weight), value: true, toggleable: false, editable: true,
+          expiry: 0, contexts: null,
           onDelete: () => { entity.weight = 0; markDirty(); }
         });
       }
     }
     (entity.parents || []).forEach((p, idx) => {
       rows.push({
-        rowId: `parent:${idx}`, badge: 'INHERITANCE', cls: 'type-inheritance',
-        key: p.group, value: true, toggleable: false, expiry: p.expiry || 0, contexts: p.contexts || null,
+        rowId: `parent:${idx}`, category: 'INHERITANCE', badge: 'INHERITANCE', cls: 'type-inheritance',
+        key: p.group, value: true, toggleable: false, editable: true, ref: p,
+        expiry: p.expiry || 0, contexts: p.contexts || null,
         onDelete: () => { entity.parents.splice(idx, 1); markDirty(); }
       });
     });
     (entity.prefixes || []).forEach((pm, idx) => {
       rows.push({
-        rowId: `prefix:${idx}`, badge: 'PREFIX', cls: 'type-prefix',
-        key: pm.value, extraNote: `(weight: ${pm.priority})`, value: true, toggleable: false,
+        rowId: `prefix:${idx}`, category: 'AFFIX', badge: 'PREFIX', cls: 'type-prefix',
+        key: pm.value, extraNote: `(weight: ${pm.priority})`, value: true, toggleable: false, editable: true, ref: pm,
         expiry: pm.expiry || 0, contexts: pm.contexts || null,
         onDelete: () => { entity.prefixes.splice(idx, 1); markDirty(); }
       });
     });
     (entity.suffixes || []).forEach((sm, idx) => {
       rows.push({
-        rowId: `suffix:${idx}`, badge: 'SUFFIX', cls: 'type-suffix',
-        key: sm.value, extraNote: `(weight: ${sm.priority})`, value: true, toggleable: false,
+        rowId: `suffix:${idx}`, category: 'AFFIX', badge: 'SUFFIX', cls: 'type-suffix',
+        key: sm.value, extraNote: `(weight: ${sm.priority})`, value: true, toggleable: false, editable: true, ref: sm,
         expiry: sm.expiry || 0, contexts: sm.contexts || null,
         onDelete: () => { entity.suffixes.splice(idx, 1); markDirty(); }
       });
@@ -374,8 +568,8 @@
         coveredGlobalMeta.add(String(me.key || '').toLowerCase());
       }
       rows.push({
-        rowId: `metaEntry:${idx}`, badge: 'META', cls: 'type-meta',
-        key: `${me.key} = ${me.value}`, value: true, toggleable: false,
+        rowId: `metaEntry:${idx}`, category: 'META', badge: 'META', cls: 'type-meta',
+        key: `${me.key} = ${me.value}`, value: true, toggleable: false, editable: true, ref: me,
         expiry: me.expiry || 0, contexts: me.contexts || null,
         onDelete: () => {
           entity.metaEntries.splice(idx, 1);
@@ -389,8 +583,9 @@
     Object.entries(entity.meta || {}).forEach(([mk, mv]) => {
       if (coveredGlobalMeta.has(mk.toLowerCase())) return;
       rows.push({
-        rowId: `meta:${mk}`, badge: 'META', cls: 'type-meta',
-        key: `${mk} = ${mv}`, value: true, toggleable: false, expiry: 0, contexts: null,
+        rowId: `meta:${mk}`, category: 'META', badge: 'META', cls: 'type-meta',
+        key: `${mk} = ${mv}`, metaKey: mk, metaVal: mv, value: true, toggleable: false, editable: true,
+        expiry: 0, contexts: null,
         onDelete: () => {
           delete entity.meta[mk];
           if (Array.isArray(entity.metaEntries)) {
@@ -404,14 +599,58 @@
     });
     (entity.nodes || []).forEach((n, idx) => {
       rows.push({
-        rowId: `perm:${idx}`, badge: 'PERMISSION', cls: 'type-permission',
-        key: n.key, value: Boolean(n.value), toggleable: true,
-        expiry: n.expiry || 0, contexts: n.contexts || null, nodeRef: n,
+        rowId: `perm:${idx}`, category: 'PERMISSION', badge: 'PERMISSION', cls: 'type-permission',
+        key: n.key, value: Boolean(n.value), toggleable: true, editable: true,
+        expiry: n.expiry || 0, contexts: n.contexts || null, nodeRef: n, ref: n,
         onToggle: () => { n.value = !n.value; markDirty(); },
         onDelete: () => { entity.nodes.splice(idx, 1); markDirty(); }
       });
     });
     return rows;
+  }
+
+  function buildInheritedRows(entity) {
+    const parents = collectInheritedGroups(entity);
+    const out = [];
+    parents.forEach(pg => {
+      (pg.nodes || []).forEach((n, idx) => {
+        out.push({
+          rowId: `inh-perm:${pg.name}:${idx}`, category: 'PERMISSION', badge: 'PERMISSION', cls: 'type-permission',
+          inherited: true, sourceGroup: pg.name,
+          key: n.key, value: Boolean(n.value), expiry: n.expiry || 0, contexts: n.contexts || null,
+          copyPayload: () => {
+            entity.nodes = entity.nodes || [];
+            entity.nodes.push(deepClone(n));
+            markDirty();
+          }
+        });
+      });
+      (pg.prefixes || []).forEach((pm, idx) => {
+        out.push({
+          rowId: `inh-pref:${pg.name}:${idx}`, category: 'AFFIX', badge: 'PREFIX', cls: 'type-prefix',
+          inherited: true, sourceGroup: pg.name,
+          key: pm.value, extraNote: `(weight: ${pm.priority})`, value: true, expiry: pm.expiry || 0, contexts: pm.contexts || null,
+          copyPayload: () => {
+            entity.prefixes = entity.prefixes || [];
+            entity.prefixes.push(deepClone(pm));
+            markDirty();
+          }
+        });
+      });
+      (pg.suffixes || []).forEach((sm, idx) => {
+        out.push({
+          rowId: `inh-suff:${pg.name}:${idx}`, category: 'AFFIX', badge: 'SUFFIX', cls: 'type-suffix',
+          inherited: true, sourceGroup: pg.name,
+          key: sm.value, extraNote: `(weight: ${sm.priority})`, value: true, expiry: sm.expiry || 0, contexts: sm.contexts || null,
+          copyPayload: () => {
+            entity.suffixes = entity.suffixes || [];
+            entity.suffixes.push(deepClone(sm));
+            markDirty();
+          }
+        });
+      });
+    });
+    return out;
   }
 
   /* ==================== Views ==================== */
@@ -438,7 +677,7 @@
         <section class="feature-grid">
           <div class="feature-card">
             <h3>Web Permissions Editor</h3>
-            <p>Visual LuckPermsWeb-style editor with one-click Live Save to Gate over HTTP API or portable <code>sp1_</code> edit codes.</p>
+            <p>Visual browser permissions editor with one-click Live Save to Gate over HTTP API or portable <code>sp1_</code> edit codes.</p>
             <code>/sp editor [filter]</code>
           </div>
           <div class="feature-card">
@@ -459,7 +698,7 @@
           <div class="feature-card">
             <h3>Track Progressions</h3>
             <p>Define ordered promotion tracks (e.g. donors or staff) and promote/demote players atomically via Gate or API.</p>
-            <code>/sp user &lt;player&gt; promote staff</code>
+            <code>/sp track &lt;track&gt; editor</code>
           </div>
           <div class="feature-card">
             <h3>Portable Offline Codes</h3>
@@ -496,11 +735,27 @@
     `;
   }
 
+  function compareRows(a, b) {
+    const dir = STATE.sortDir;
+    switch (STATE.sortBy) {
+      case 'key':
+        return dir * String(a.key).localeCompare(String(b.key));
+      case 'value':
+        return dir * (Number(b.value) - Number(a.value) || String(a.key).localeCompare(String(b.key)));
+      case 'expiry':
+        return dir * ((a.expiry || 0) - (b.expiry || 0) || String(a.key).localeCompare(String(b.key)));
+      case 'contexts':
+        return dir * contextsToInputString(a.contexts).localeCompare(contextsToInputString(b.contexts));
+      default:
+        return 0;
+    }
+  }
+
   function renderEditor() {
     if (!STATE.editor) {
       return renderSessionPromptCard({
         title: 'Web Permissions Editor',
-        commands: ['/sp editor', '/sp user <user> editor', '/sp group <group> editor', '/spb editor'],
+        commands: ['/sp editor', '/sp user <user> editor', '/sp group <group> editor', '/sp track <track> editor', '/spb editor'],
         onDemoId: 'btn-editor-demo',
         extraButtonId: 'btn-open-import',
         extraButtonLabel: 'Import JSON / sp1_ Code'
@@ -517,9 +772,26 @@
 
     if (entity) {
       const isGroup = STATE.selected.type === 'group';
-      const rows = buildUnifiedRows(entity, STATE.selected.type);
+      const ownRows = buildUnifiedRows(entity, STATE.selected.type);
+      const inheritedRows = buildInheritedRows(entity);
+      const allRows = STATE.showInherited ? ownRows.concat(inheritedRows) : ownRows;
+
       const nf = STATE.nodesFilter.trim().toLowerCase();
-      const filteredRows = nf ? rows.filter(r => r.key.toLowerCase().includes(nf) || r.badge.toLowerCase().includes(nf)) : rows;
+      const filteredRows = allRows.filter(r => {
+        if (STATE.nodeTypeFilter !== 'ALL' && r.category !== STATE.nodeTypeFilter) return false;
+        if (!nf) return true;
+        return r.key.toLowerCase().includes(nf) ||
+          r.badge.toLowerCase().includes(nf) ||
+          (r.sourceGroup || '').toLowerCase().includes(nf) ||
+          contextsToInputString(r.contexts).toLowerCase().includes(nf);
+      });
+
+      if (STATE.sortBy !== 'default') {
+        filteredRows.sort(compareRows);
+      }
+
+      const sortArrow = col => STATE.sortBy === col ? (STATE.sortDir > 0 ? ' ▴' : ' ▾') : '';
+      const editableFiltered = filteredRows.filter(r => !r.inherited);
 
       mainHtml = `
         <div class="target-header">
@@ -530,7 +802,9 @@
               ? `<span class="target-sub">( ${esc(entity.name)} )</span>`
               : `<img class="user-head" style="width:28px;height:28px" src="https://mc-heads.net/avatar/${esc(entity.uuid || entity.username)}/28" data-name="${esc(entity.username)}" onerror="__spHeadFallback(this)" alt="">`
             }
-            <div style="margin-left:auto;display:flex;gap:6px;">
+            <span class="mc-preview-pill" title="Live rendered prefix + name + suffix">${resolveEntityPreview(entity, STATE.selected.type)}</span>
+            <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
+              ${isGroup ? `<button type="button" class="btn btn-secondary btn-xs" id="btn-clone-group">Clone Group</button>` : ''}
               ${isGroup && entity.name !== 'default' ? `<button type="button" class="btn btn-danger btn-xs" id="btn-delete-entity">Delete Group</button>` : ''}
               ${!isGroup ? `<button type="button" class="btn btn-danger btn-xs" id="btn-delete-entity">Delete User</button>` : ''}
             </div>
@@ -550,7 +824,7 @@
                 <select id="select-user-primary" class="dock-select" style="height:28px;font-family:var(--mono)">
                   ${STATE.editor.groups.map(g => `<option value="${esc(g.name)}" ${entity.primaryGroup === g.name ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}
                 </select>
-                <span class="mono-chip" title="Player UUID">${esc(entity.uuid)}</span>
+                <span class="mono-chip" id="copy-user-uuid" title="Click to copy UUID" style="cursor:pointer">${esc(entity.uuid)}</span>
               </div>
             `}
             <div class="meta-line">
@@ -558,7 +832,7 @@
               <button type="button" class="add-parent-btn" id="btn-add-parent" title="Add parent group">+</button>
               ${(entity.parents || []).map((p, idx) => `
                 <button type="button" class="chip-btn" data-remove-parent="${idx}" title="Remove parent ${esc(p.group)}">
-                  ${esc(p.group)} <span class="x">×</span>
+                  ${esc(p.group)}${p.contexts && Object.keys(p.contexts).length ? ` <span style="color:var(--accent)">[${esc(contextsToInputString(p.contexts))}]</span>` : ''} <span class="x">×</span>
                 </button>
               `).join('') || '<span style="color:var(--text-dim)">none</span>'}
             </div>
@@ -567,47 +841,80 @@
 
         <div class="nodes-hdr">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-            <h3>Nodes <span style="color:var(--text-muted);font-weight:500">(${rows.length})</span></h3>
-            ${STATE.checkedRows.size > 0 ? `
-              <button type="button" class="btn btn-danger btn-xs" id="btn-bulk-delete">Delete selected (${STATE.checkedRows.size})</button>
-            ` : ''}
+            <h3>Nodes <span style="color:var(--text-muted);font-weight:500">(${ownRows.length}${STATE.showInherited ? ` + ${inheritedRows.length} inherited` : ''})</span></h3>
+            <button type="button" class="filter-pill ${STATE.showInherited ? 'active' : ''}" id="btn-toggle-inherited">
+              ${STATE.showInherited ? 'Hide' : 'Show'} Inherited (${inheritedRows.length})
+            </button>
           </div>
           <div class="nodes-tools">
-            <input type="text" id="input-nodes-filter" class="nodes-filter-input" value="${esc(STATE.nodesFilter)}" placeholder="Filter nodes...">
+            <input type="text" id="input-nodes-filter" class="nodes-filter-input" value="${esc(STATE.nodesFilter)}" placeholder="Filter nodes or contexts...">
           </div>
         </div>
+
+        <div class="node-type-tabs">
+          ${[
+            ['ALL', 'All'],
+            ['PERMISSION', 'Permissions'],
+            ['INHERITANCE', 'Inheritance'],
+            ['AFFIX', 'Prefixes / Suffixes'],
+            ['META', 'Meta']
+          ].map(([code, label]) => `
+            <button type="button" class="filter-pill ${STATE.nodeTypeFilter === code ? 'active' : ''}" data-type-filter="${code}">${label}</button>
+          `).join('')}
+        </div>
+
+        ${STATE.checkedRows.size > 0 ? `
+          <div class="bulk-bar">
+            <span class="bulk-bar-label">${STATE.checkedRows.size} selected:</span>
+            <button type="button" class="btn btn-secondary btn-xs" id="btn-bulk-flip">Flip True/False</button>
+            <button type="button" class="btn btn-secondary btn-xs" id="btn-bulk-contexts">Set Contexts</button>
+            <button type="button" class="btn btn-secondary btn-xs" id="btn-bulk-expiry">Set Expiry</button>
+            <button type="button" class="btn btn-danger btn-xs" id="btn-bulk-delete">Delete Selected</button>
+          </div>
+        ` : ''}
 
         <table class="nodes-table">
           <thead>
             <tr>
-              <th style="width:36px"><input type="checkbox" id="chk-all-rows" ${filteredRows.length && filteredRows.every(r => STATE.checkedRows.has(r.rowId)) ? 'checked' : ''}></th>
-              <th>Node</th>
-              <th style="width:90px">Value</th>
-              <th style="width:120px">Expiry</th>
-              <th>Contexts</th>
-              <th style="width:38px"></th>
+              <th style="width:36px"><input type="checkbox" id="chk-all-rows" ${editableFiltered.length && editableFiltered.every(r => STATE.checkedRows.has(r.rowId)) ? 'checked' : ''}></th>
+              <th class="sortable" data-sort-col="key">Node${sortArrow('key')}</th>
+              <th class="sortable" data-sort-col="value" style="width:90px">Value${sortArrow('value')}</th>
+              <th class="sortable" data-sort-col="expiry" style="width:120px">Expiry${sortArrow('expiry')}</th>
+              <th class="sortable" data-sort-col="contexts">Contexts${sortArrow('contexts')}</th>
+              <th style="width:68px"></th>
             </tr>
           </thead>
           <tbody>
             ${filteredRows.map(r => `
-              <tr data-rowid="${esc(r.rowId)}">
-                <td><input type="checkbox" class="row-chk" data-rowid="${esc(r.rowId)}" ${STATE.checkedRows.has(r.rowId) ? 'checked' : ''}></td>
+              <tr data-rowid="${esc(r.rowId)}" class="${r.inherited ? 'inherited-row' : ''}">
+                <td>${r.inherited ? '' : `<input type="checkbox" class="row-chk" data-rowid="${esc(r.rowId)}" ${STATE.checkedRows.has(r.rowId) ? 'checked' : ''}>`}</td>
                 <td>
                   <div class="node-cell">
+                    ${r.inherited ? `<span class="badge-pill type-inherited">INHERITED · ${esc(r.sourceGroup)}</span>` : ''}
                     <span class="badge-pill ${esc(r.cls)}">${esc(r.badge)}</span>
                     <span class="node-key">${esc(r.key)}</span>
                     ${r.extraNote ? `<span class="node-extra-note">${esc(r.extraNote)}</span>` : ''}
                   </div>
                 </td>
                 <td>
-                  ${r.toggleable
+                  ${r.toggleable && !r.inherited
                     ? `<button type="button" class="val-pill ${r.value ? 'val-true' : 'val-false'}" data-toggle-row="${esc(r.rowId)}">${r.value ? 'true' : 'false'}</button>`
-                    : `<span class="val-pill val-true" style="opacity:0.75">true</span>`
+                    : `<span class="val-pill ${r.value ? 'val-true' : 'val-false'}" style="opacity:0.75">${r.value ? 'true' : 'false'}</span>`
                   }
                 </td>
                 <td><span style="font-family:var(--mono);font-size:12px;color:${r.expiry ? 'var(--text)' : 'var(--text-dim)'}">${esc(formatExpiry(r.expiry))}</span></td>
                 <td>${formatContexts(r.contexts)}</td>
-                <td><button type="button" class="row-del-btn" data-del-row="${esc(r.rowId)}" title="Delete node">×</button></td>
+                <td>
+                  <div class="row-actions">
+                    ${r.inherited
+                      ? `<button type="button" class="row-icon-btn" data-copy-inh="${esc(r.rowId)}" title="Copy directly onto ${esc(isGroup ? entity.name : entity.username)}">+</button>`
+                      : `
+                        ${r.editable ? `<button type="button" class="row-icon-btn" data-edit-row="${esc(r.rowId)}" title="Edit node">✎</button>` : ''}
+                        <button type="button" class="row-del-btn" data-del-row="${esc(r.rowId)}" title="Delete node">×</button>
+                      `
+                    }
+                  </div>
+                </td>
               </tr>
             `).join('') || `<tr><td colspan="6" style="color:var(--text-dim);text-align:center;padding:24px">No matching nodes</td></tr>`}
           </tbody>
@@ -615,13 +922,13 @@
       `;
     }
 
-    const suggestions = computeAutocomplete(STATE.addForm.key);
+    const suggestions = computeAutocomplete(STATE.addForm.key, STATE.addForm.type, entity);
 
     return `
       <div class="editor-shell">
         <aside class="editor-sidebar">
           <div class="sidebar-search">
-            <input type="text" id="input-sidebar-search" value="${esc(STATE.sidebarQuery)}" placeholder="Search">
+            <input type="text" id="input-sidebar-search" value="${esc(STATE.sidebarQuery)}" placeholder="Search groups, users, tracks...">
           </div>
           <div class="sidebar-scroll">
             <div class="sidebar-section-hdr">
@@ -705,7 +1012,7 @@
           <div class="editor-topbar">
             <div class="editor-topbar-left">
               <span class="editor-topbar-title">Web Permissions Editor</span>
-              ${STATE.dirtyCount > 0 ? `<span class="mono-chip" style="color:var(--accent)">${STATE.dirtyCount} unsaved edit${STATE.dirtyCount === 1 ? '' : 's'}</span>` : ''}
+              ${STATE.dirtyCount > 0 ? `<span class="mono-chip" style="color:var(--accent)">${STATE.dirtyCount} unsaved edit${STATE.dirtyCount === 1 ? '' : 's'} (Ctrl+S)</span>` : ''}
             </div>
             <div class="editor-topbar-actions">
               <button type="button" class="btn btn-secondary btn-sm" id="btn-open-import">Import / Export</button>
@@ -742,11 +1049,14 @@
               ` : ''}
 
               <div class="dock-col dock-col-grow">
-                <span class="dock-label">${STATE.addForm.type === 'PERMISSION' ? 'Permissions' : 'Value'}</span>
+                <span class="dock-label">
+                  <span>${STATE.addForm.type === 'PERMISSION' ? 'Permissions' : STATE.addForm.type === 'INHERITANCE' ? 'Parent Group' : 'Value'}</span>
+                  ${(STATE.addForm.type === 'PREFIX' || STATE.addForm.type === 'SUFFIX') ? `<span id="dock-affix-preview" class="mc-preview-pill" style="padding:1px 6px;font-size:11px;text-transform:none">${renderMcText(STATE.addForm.key) || '<span style="color:var(--text-dim)">preview</span>'}</span>` : ''}
+                </span>
                 <input type="text" id="dock-key" class="dock-input" autocomplete="off"
                   value="${esc(STATE.addForm.key)}"
-                  placeholder="${STATE.addForm.type === 'PERMISSION' ? 'Enter permissions or paste many' : 'Enter value'}">
-                ${STATE.addForm.type === 'PERMISSION' && STATE.acOpen && suggestions.length ? `
+                  placeholder="${STATE.addForm.type === 'PERMISSION' ? 'Enter permissions or paste many' : STATE.addForm.type === 'INHERITANCE' ? 'Select or type group name' : 'Enter value'}">
+                ${(STATE.addForm.type === 'PERMISSION' || STATE.addForm.type === 'INHERITANCE') && STATE.acOpen && suggestions.length ? `
                   <div class="autocomplete-popover" id="ac-popover">
                     ${suggestions.map((perm, idx) => `
                       <div class="ac-item ${idx === STATE.acIndex ? 'selected' : ''}" data-ac-val="${esc(perm)}">
@@ -765,8 +1075,13 @@
                 </div>
               ` : ''}
 
-              <div class="dock-col" style="width:105px">
-                <span class="dock-label">Expiry</span>
+              <div class="dock-col" style="width:142px">
+                <span class="dock-label">
+                  <span>Expiry</span>
+                  <span class="preset-pills">
+                    ${['1h', '1d', '7d', '30d'].map(p => `<button type="button" class="preset-chip" data-dock-exp-preset="${p}">${p}</button>`).join('')}
+                  </span>
+                </span>
                 <input type="text" id="dock-expiry" class="dock-input" value="${esc(STATE.addForm.expiry)}" placeholder="never">
               </div>
 
@@ -787,11 +1102,18 @@
     `;
   }
 
-  function computeAutocomplete(input) {
+  function computeAutocomplete(input, kind = 'PERMISSION', entity = null) {
     if (!STATE.editor) return [];
-    const perms = STATE.editor.knownPermissions || [];
     const tokens = String(input || '').trim().split(/[\s,]+/);
     const q = (tokens[tokens.length - 1] || '').toLowerCase();
+    if (kind === 'INHERITANCE') {
+      const selfName = entity && entity.name ? entity.name.toLowerCase() : '';
+      const groups = (STATE.editor.groups || [])
+        .map(g => g.name)
+        .filter(n => n.toLowerCase() !== selfName);
+      return (!q ? groups : groups.filter(g => g.toLowerCase().includes(q))).slice(0, 14);
+    }
+    const perms = STATE.editor.knownPermissions || [];
     if (!q) return perms.slice(0, 12);
     return perms.filter(p => p.toLowerCase().includes(q)).slice(0, 14);
   }
@@ -806,12 +1128,17 @@
     }
     const meta = STATE.verbose.metadata || {};
     const fq = STATE.verboseFilter.trim().toLowerCase();
-    const entries = (STATE.verbose.entries || []).filter(e => {
+    const allEntries = STATE.verbose.entries || [];
+    const entries = allEntries.filter(e => {
       const res = (e.result || 'undefined').toLowerCase();
       if (STATE.verboseExclude[res]) return false;
       if (!fq) return true;
       return (e.subject || '').toLowerCase().includes(fq) || (e.permission || '').toLowerCase().includes(fq);
     });
+    const countTrue = entries.filter(e => (e.result || '').toLowerCase() === 'true').length;
+    const countFalse = entries.filter(e => (e.result || '').toLowerCase() === 'false').length;
+    const countUndef = entries.length - countTrue - countFalse;
+    const subjects = new Set(entries.map(e => e.subject || 'internal')).size;
     const durSec = Math.max(0, Math.round((meta.durationMs || 0) / 1000));
 
     return `
@@ -823,7 +1150,7 @@
             <span class="k">Start time</span><span class="v">${esc(meta.startTime ? new Date(meta.startTime).toISOString().replace('T',' ').slice(0,19)+' UTC' : '-')}</span>
             <span class="k">End time</span><span class="v">${esc(meta.endTime ? new Date(meta.endTime).toISOString().replace('T',' ').slice(0,19)+' UTC' : '-')}</span>
             <span class="k">Duration</span><span class="v">${durSec}s</span>
-            <span class="k">Count</span><span class="v">${entries.length} / ${meta.totalCount ?? (STATE.verbose.entries || []).length}</span>
+            <span class="k">Count</span><span class="v">${entries.length} / ${meta.totalCount ?? allEntries.length}</span>
             <span class="k">Filter</span><span class="v"><span class="mono-chip">${esc(meta.filter || 'any')}</span></span>
             <span class="k">Truncated</span><span class="v"><span class="val-pill ${meta.truncated ? 'val-true' : 'val-false'}">${meta.truncated ? 'true' : 'false'}</span></span>
           </div>
@@ -842,23 +1169,41 @@
               </label>
             `).join('')}
           </div>
+
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-verbose-expand-all">Expand All</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-verbose-collapse-all">Collapse All</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-verbose-download">Download JSON</button>
+          </div>
         </aside>
 
-        <section class="viewer-main">
-          ${entries.map((e, idx) => {
-            const res = (e.result || 'undefined').toLowerCase();
-            const mark = res === 'true' ? '✔' : res === 'false' ? '✘' : '—';
-            const open = STATE.verboseExpanded.has(idx);
-            return `
-              <div class="verbose-row" data-verbose-idx="${idx}">
-                <span class="verbose-subj">${esc(e.subject || 'internal')}</span>
-                <span class="verbose-perm"><span>${esc(e.permission)}</span></span>
-                <span class="val-pill val-${esc(res)}">${esc(res)} ${mark}</span>
-                ${open ? `<div class="verbose-trace">Source: ${esc(e.source || 'none')} · Timestamp: ${esc(e.timestamp ? new Date(e.timestamp).toISOString() : '-')}</div>` : ''}
-              </div>
-            `;
-          }).join('') || '<div style="padding:32px;color:var(--text-dim);text-align:center">No recorded checks match your filter.</div>'}
-        </section>
+        <div class="viewer-main-wrap">
+          <div class="verbose-stats-bar">
+            <div class="stat-group">
+              <span class="stat-chip">Shown: ${entries.length}</span>
+              <span class="stat-chip">Subjects: ${subjects}</span>
+              <span class="val-pill val-true">true: ${countTrue}</span>
+              <span class="val-pill val-false">false: ${countFalse}</span>
+              <span class="val-pill val-undefined">undefined: ${countUndef}</span>
+            </div>
+          </div>
+
+          <section class="viewer-main">
+            ${entries.map((e, idx) => {
+              const res = (e.result || 'undefined').toLowerCase();
+              const mark = res === 'true' ? '✔' : res === 'false' ? '✘' : '—';
+              const open = STATE.verboseExpanded.has(idx);
+              return `
+                <div class="verbose-row" data-verbose-idx="${idx}">
+                  <span class="verbose-subj">${esc(e.subject || 'internal')}</span>
+                  <span class="verbose-perm"><span>${esc(e.permission)}</span></span>
+                  <span class="val-pill val-${esc(res)}">${esc(res)} ${mark}</span>
+                  ${open ? `<div class="verbose-trace">Source: ${esc(e.source || 'none')} · Timestamp: ${esc(e.timestamp ? new Date(e.timestamp).toISOString() : '-')}</div>` : ''}
+                </div>
+              `;
+            }).join('') || '<div style="padding:32px;color:var(--text-dim);text-align:center">No recorded checks match your filter.</div>'}
+          </section>
+        </div>
       </div>
     `;
   }
@@ -886,11 +1231,15 @@
       const hasChildren = node.children.size > 0;
       if (hasChildren) {
         const collapsed = STATE.treeCollapsed.has(node.path);
+        const wild = node.path + '.*';
         html += `
           <div>
             <div class="tree-row tree-branch" data-tree-toggle="${esc(node.path)}">
-              <span>${collapsed ? '▸' : '▾'} ${esc(node.path)}</span>
-              <span style="color:var(--text-dim);font-size:11px">${node.children.size}</span>
+              <span>${collapsed ? '▸' : '▾'} ${esc(node.path)} <span style="color:var(--text-dim);font-size:11px">(${node.children.size})</span></span>
+              <span class="tree-actions">
+                <button type="button" class="preset-chip" data-copy-node="${esc(wild)}" title="Copy wildcard ${esc(wild)}">copy *</button>
+                ${STATE.editor ? `<button type="button" class="preset-chip" data-use-tree-node="${esc(wild)}" title="Load wildcard into editor">use</button>` : ''}
+              </span>
             </div>
             ${collapsed ? '' : `<div class="tree-children">${renderTreeBranch(node.children)}</div>`}
           </div>
@@ -899,7 +1248,10 @@
         html += `
           <div class="tree-row" data-copy-node="${esc(node.path)}" title="Click to copy">
             <span>${esc(node.path)}</span>
-            <span style="color:var(--text-dim);font-size:11px">copy</span>
+            <span class="tree-actions">
+              <span style="color:var(--text-dim);font-size:11px">copy</span>
+              ${STATE.editor ? `<button type="button" class="preset-chip" data-use-tree-node="${esc(node.path)}" title="Load into editor">use</button>` : ''}
+            </span>
           </div>
         `;
       }
@@ -916,8 +1268,9 @@
       });
     }
     const meta = STATE.tree.metadata || {};
+    const allPerms = STATE.tree.permissions || [];
     const fq = STATE.treeFilter.trim().toLowerCase();
-    const perms = (STATE.tree.permissions || []).filter(p => !fq || p.toLowerCase().includes(fq));
+    const perms = allPerms.filter(p => !fq || p.toLowerCase().includes(fq));
     const treeMap = buildPermTree(perms);
 
     return `
@@ -928,7 +1281,8 @@
             <span class="k">Uploaded by</span><span class="v">${esc(meta.uploadedBy || 'Console')}</span>
             <span class="k">Time</span><span class="v">${esc(meta.time ? new Date(meta.time).toISOString().replace('T',' ').slice(0,19)+' UTC' : '-')}</span>
             <span class="k">Root</span><span class="v"><span class="mono-chip">${esc(meta.root || '.')}</span></span>
-            <span class="k">Nodes</span><span class="v">${perms.length}</span>
+            <span class="k">Nodes</span><span class="v">${perms.length} / ${allPerms.length}</span>
+            <span class="k">Top Branches</span><span class="v">${treeMap.size}</span>
           </div>
 
           <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -999,6 +1353,32 @@
     root.innerHTML = '';
   }
 
+  function buildContextSuggestionChips(targetInputId) {
+    const pot = (STATE.editor && STATE.editor.potentialContexts) || { server: ['lobby', 'survival'], world: ['world'] };
+    const pairs = [];
+    Object.entries(pot).forEach(([k, vals]) => {
+      (vals || []).slice(0, 5).forEach(v => pairs.push(`${k}=${v}`));
+    });
+    if (!pairs.length) return '';
+    return `
+      <div style="display:flex;flex-wrap:wrap;gap:4px">
+        ${pairs.map(p => `<button type="button" class="preset-chip" data-ctx-suggest="${esc(p)}" data-target-in="${esc(targetInputId)}">+ ${esc(p)}</button>`).join('')}
+      </div>
+    `;
+  }
+
+  function bindContextSuggestionChips(inputEl) {
+    document.querySelectorAll('[data-ctx-suggest]').forEach(btn => {
+      btn.onclick = () => {
+        const pair = btn.dataset.ctxSuggest;
+        const parsed = parseContextsString(inputEl.value) || {};
+        const idx = pair.indexOf('=');
+        if (idx > 0) parsed[pair.slice(0, idx)] = pair.slice(idx + 1);
+        inputEl.value = contextsToInputString(parsed);
+      };
+    });
+  }
+
   function openSearchModal() {
     const docs = window.STONYPERMS_WIKI || [];
     const items = [];
@@ -1008,12 +1388,13 @@
     items.push({ kind: 'DEMO', title: 'Open Interactive Demo Editor', sub: 'Loads sample groups, tracks & users', act: () => { loadEditorSession(window.STONYPERMS_DEMO.editor, 'demo', '', ''); navigate('/editor'); } });
     docs.forEach(d => items.push({ kind: 'WIKI', title: d.title, sub: d.category, act: () => { STATE.wikiSlug = d.slug; navigate('/wiki'); } }));
     if (STATE.editor) {
+      STATE.editor.tracks.forEach(t => items.push({ kind: 'TRACK', title: t.name, sub: t.groups.join(' -> ') || '(empty)', act: () => { STATE.expandedTracks[t.name] = true; STATE.pendingTrackModal = t.name; navigate('/editor'); } }));
       STATE.editor.groups.forEach(g => items.push({ kind: 'GROUP', title: g.displayName || g.name, sub: `${g.name} · weight ${g.weight}`, act: () => { STATE.selected = { type: 'group', id: g.name }; navigate('/editor'); } }));
       STATE.editor.users.forEach(u => items.push({ kind: 'USER', title: u.username || u.uuid, sub: u.uuid, act: () => { STATE.selected = { type: 'user', id: u.uuid }; navigate('/editor'); } }));
     }
 
     openModal('Quick Search (Ctrl+K)', `
-      <input type="text" id="global-search-input" class="field-input" placeholder="Search wiki pages, groups, users, tools...">
+      <input type="text" id="global-search-input" class="field-input" placeholder="Search wiki pages, groups, users, tracks, tools...">
       <div id="global-search-results" style="display:flex;flex-direction:column;gap:4px;max-height:340px;overflow-y:auto"></div>
     `, '');
 
@@ -1082,7 +1463,7 @@
       }
     }
 
-    let applyCode = (liveResult && liveResult.applyCode) || '';
+    const applyCode = (liveResult && liveResult.applyCode) || '';
     let portableCode = '';
     try {
       portableCode = await encodePortableSp1(payload);
@@ -1218,6 +1599,31 @@
     };
   }
 
+  function openCloneGroupModal(sourceGroup) {
+    openModal(`Clone Group: ${sourceGroup.name}`, `
+      <div class="field-group"><label>New Group Name (lowercase a-z0-9_+-)</label><input id="clg-name" class="field-input" value="${esc(sourceGroup.name)}-copy"></div>
+      <div class="field-group"><label>Weight</label><input id="clg-weight" type="number" class="field-input" value="${esc(sourceGroup.weight || 0)}"></div>
+      <div class="field-group"><label>Display Name (optional)</label><input id="clg-display" class="field-input" value="${esc(sourceGroup.displayName || '')}"></div>
+    `, `<button type="button" class="btn btn-primary btn-sm" id="clg-submit">Clone Group</button>`);
+    document.getElementById('clg-submit').onclick = () => {
+      const name = document.getElementById('clg-name').value.trim().toLowerCase();
+      if (!/^[a-z0-9_+-]{1,64}$/.test(name)) return toast('Invalid group name', true);
+      if (STATE.editor.groups.some(g => g.name === name)) return toast('Group already exists', true);
+      const clone = deepClone(sourceGroup);
+      clone.name = name;
+      clone.weight = parseInt(document.getElementById('clg-weight').value || '0', 10) || 0;
+      clone.displayName = document.getElementById('clg-display').value.trim();
+      STATE.editor.groups.push(clone);
+      STATE.editor.groups.sort((a, b) => (b.weight - a.weight) || a.name.localeCompare(b.name));
+      STATE.deletedGroups.delete(name);
+      STATE.selected = { type: 'group', id: name };
+      markDirty();
+      closeModal();
+      toast(`Cloned '${sourceGroup.name}' to '${name}'`);
+      render();
+    };
+  }
+
   function openCreateTrackModal() {
     openModal('Create Promotion Track', `
       <div class="field-group"><label>Track Name</label><input id="ct-name" class="field-input" placeholder="e.g. builders"></div>
@@ -1243,32 +1649,99 @@
   function openEditTrackModal(trackName) {
     const tr = STATE.editor.tracks.find(t => t.name === trackName);
     if (!tr) return;
-    openModal(`Edit Track: ${tr.name}`, `
-      <div class="field-group">
-        <label>Ordered Groups (comma-separated)</label>
-        <input id="et-groups" class="field-input" value="${esc(tr.groups.join(', '))}">
-      </div>
-    `, `
-      <button type="button" class="btn btn-danger btn-sm" id="et-delete">Delete Track</button>
-      <button type="button" class="btn btn-primary btn-sm" id="et-save">Save Track</button>
-    `);
-    document.getElementById('et-delete').onclick = () => {
-      STATE.editor.tracks = STATE.editor.tracks.filter(t => t.name !== tr.name);
-      STATE.deletedTracks.add(tr.name);
-      markDirty();
-      closeModal();
-      render();
-    };
-    document.getElementById('et-save').onclick = () => {
-      const groups = document.getElementById('et-groups').value.split(/[,\s]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
-      for (const gn of groups) {
-        if (!STATE.editor.groups.some(g => g.name === gn)) return toast(`Unknown group: ${gn}`, true);
+    let working = tr.groups.slice();
+
+    const drawModal = () => {
+      const available = STATE.editor.groups.map(g => g.name).filter(g => !working.includes(g));
+      openModal(`Edit Track: ${tr.name}`, `
+        <div class="field-group">
+          <label>Ordered Promotion Ladder (lowest → highest)</label>
+          <div class="track-step-list">
+            ${working.map((gn, idx) => `
+              <div class="track-step">
+                <span class="track-step-name"><span class="track-step-idx">#${idx + 1}</span> ${esc(gn)}</span>
+                <div style="display:flex;gap:4px">
+                  <button type="button" class="btn btn-secondary btn-xs" data-tr-up="${idx}" ${idx === 0 ? 'disabled' : ''}>▲</button>
+                  <button type="button" class="btn btn-secondary btn-xs" data-tr-dn="${idx}" ${idx === working.length - 1 ? 'disabled' : ''}>▼</button>
+                  <button type="button" class="row-del-btn" data-tr-rm="${idx}">×</button>
+                </div>
+              </div>
+            `).join('') || '<div style="color:var(--text-dim);font-size:12px">No groups on this track yet.</div>'}
+          </div>
+        </div>
+        ${available.length ? `
+          <div class="field-group">
+            <label>Add Group to Track</label>
+            <div style="display:flex;gap:8px">
+              <select id="et-add-sel" class="field-input">
+                ${available.map(gn => `<option value="${esc(gn)}">${esc(gn)}</option>`).join('')}
+              </select>
+              <button type="button" class="btn btn-secondary btn-sm" id="et-add-btn">+ Append</button>
+            </div>
+          </div>
+        ` : ''}
+        <div class="field-group">
+          <label>Clone Track As (optional)</label>
+          <div style="display:flex;gap:8px">
+            <input id="et-clone-name" class="field-input" placeholder="${esc(tr.name)}_copy">
+            <button type="button" class="btn btn-secondary btn-sm" id="et-clone-btn">Clone</button>
+          </div>
+        </div>
+      `, `
+        <button type="button" class="btn btn-danger btn-sm" id="et-delete">Delete Track</button>
+        <button type="button" class="btn btn-primary btn-sm" id="et-save">Save Track</button>
+      `);
+
+      document.querySelectorAll('[data-tr-up]').forEach(b => {
+        b.onclick = () => {
+          const i = Number(b.dataset.trUp);
+          if (i > 0) { [working[i - 1], working[i]] = [working[i], working[i - 1]]; drawModal(); }
+        };
+      });
+      document.querySelectorAll('[data-tr-dn]').forEach(b => {
+        b.onclick = () => {
+          const i = Number(b.dataset.trDn);
+          if (i < working.length - 1) { [working[i + 1], working[i]] = [working[i], working[i + 1]]; drawModal(); }
+        };
+      });
+      document.querySelectorAll('[data-tr-rm]').forEach(b => {
+        b.onclick = () => { working.splice(Number(b.dataset.trRm), 1); drawModal(); };
+      });
+      const addBtn = document.getElementById('et-add-btn');
+      if (addBtn) {
+        addBtn.onclick = () => {
+          const v = document.getElementById('et-add-sel').value;
+          if (v && !working.includes(v)) { working.push(v); drawModal(); }
+        };
       }
-      tr.groups = groups;
-      markDirty();
-      closeModal();
-      render();
+      document.getElementById('et-clone-btn').onclick = () => {
+        const cloneName = document.getElementById('et-clone-name').value.trim().toLowerCase();
+        if (!/^[a-z0-9_+-]{1,64}$/.test(cloneName)) return toast('Invalid track name', true);
+        if (STATE.editor.tracks.some(t => t.name === cloneName)) return toast('Track already exists', true);
+        STATE.editor.tracks.push({ name: cloneName, groups: working.slice() });
+        STATE.expandedTracks[cloneName] = true;
+        STATE.deletedTracks.delete(cloneName);
+        markDirty();
+        closeModal();
+        toast(`Cloned track '${tr.name}' to '${cloneName}'`);
+        render();
+      };
+      document.getElementById('et-delete').onclick = () => {
+        STATE.editor.tracks = STATE.editor.tracks.filter(t => t.name !== tr.name);
+        STATE.deletedTracks.add(tr.name);
+        markDirty();
+        closeModal();
+        render();
+      };
+      document.getElementById('et-save').onclick = () => {
+        tr.groups = working.slice();
+        markDirty();
+        closeModal();
+        render();
+      };
     };
+
+    drawModal();
   }
 
   function openCreateUserModal() {
@@ -1288,6 +1761,152 @@
       });
       STATE.deletedUsers.delete(id);
       STATE.selected = { type: 'user', id };
+      markDirty();
+      closeModal();
+      render();
+    };
+  }
+
+  function openEditNodeModal(entity, row) {
+    const expiryPresets = `
+      <div class="preset-pills" style="margin-top:4px">
+        ${['never', '1h', '12h', '1d', '7d', '30d'].map(p => `<button type="button" class="preset-chip" data-en-exp="${p}">${p}</button>`).join('')}
+      </div>
+    `;
+
+    if (row.rowId === 'displayname:0' || row.rowId === 'weight:0') {
+      const isWeight = row.rowId === 'weight:0';
+      openModal(`Edit ${isWeight ? 'Weight' : 'Display Name'}`, `
+        <div class="field-group">
+          <label>${isWeight ? 'Weight (integer)' : 'Display Name'}</label>
+          <input id="en-val" type="${isWeight ? 'number' : 'text'}" class="field-input" value="${esc(row.rawKey)}">
+        </div>
+      `, `<button type="button" class="btn btn-primary btn-sm" id="en-save">Save Changes</button>`);
+      document.getElementById('en-save').onclick = () => {
+        const v = document.getElementById('en-val').value.trim();
+        if (isWeight) entity.weight = parseInt(v || '0', 10) || 0;
+        else entity.displayName = v;
+        markDirty();
+        closeModal();
+        render();
+      };
+      return;
+    }
+
+    const isPerm = row.badge === 'PERMISSION';
+    const isParent = row.badge === 'INHERITANCE';
+    const isAffix = row.badge === 'PREFIX' || row.badge === 'SUFFIX';
+    const isMeta = row.badge === 'META';
+
+    const curKey = isMeta ? (row.ref ? row.ref.key : row.metaKey)
+      : isAffix ? String(row.ref.priority || 0)
+      : isParent ? row.ref.group
+      : row.ref.key;
+    const curVal = isMeta ? (row.ref ? row.ref.value : row.metaVal)
+      : isAffix ? row.ref.value
+      : '';
+
+    openModal(`Edit ${row.badge}`, `
+      ${isPerm ? `
+        <div class="field-group"><label>Permission Node</label><input id="en-key" class="field-input" style="font-family:var(--mono)" value="${esc(curKey)}"></div>
+        <div class="field-group">
+          <label>Value</label>
+          <select id="en-bool" class="field-input">
+            <option value="true" ${row.value ? 'selected' : ''}>true (Allow)</option>
+            <option value="false" ${!row.value ? 'selected' : ''}>false (Deny)</option>
+          </select>
+        </div>
+      ` : ''}
+      ${isParent ? `
+        <div class="field-group">
+          <label>Parent Group</label>
+          <select id="en-key" class="field-input">
+            ${STATE.editor.groups.map(g => `<option value="${esc(g.name)}" ${curKey === g.name ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}
+          </select>
+        </div>
+      ` : ''}
+      ${isAffix ? `
+        <div class="field-group"><label>Priority</label><input id="en-key" type="number" class="field-input" value="${esc(curKey)}"></div>
+        <div class="field-group">
+          <label>Affix Text <span id="en-affix-preview" class="mc-preview-pill" style="margin-left:8px">${renderMcText(curVal)}</span></label>
+          <input id="en-val" class="field-input" value="${esc(curVal)}">
+        </div>
+      ` : ''}
+      ${isMeta ? `
+        <div class="field-group"><label>Meta Key</label><input id="en-key" class="field-input" value="${esc(curKey)}"></div>
+        <div class="field-group"><label>Meta Value</label><input id="en-val" class="field-input" value="${esc(curVal)}"></div>
+      ` : ''}
+      <div class="field-group">
+        <label>Expiry (duration e.g. 7d, unix epoch, or never)</label>
+        <input id="en-exp" class="field-input" value="${row.expiry ? esc(formatDuration(Math.max(1, row.expiry - Math.floor(Date.now() / 1000)))) : 'never'}">
+        ${expiryPresets}
+      </div>
+      <div class="field-group">
+        <label>Contexts (e.g. server=lobby world=hub)</label>
+        <input id="en-ctx" class="field-input" value="${esc(contextsToInputString(row.contexts))}" placeholder="none">
+        ${buildContextSuggestionChips('en-ctx')}
+      </div>
+    `, `<button type="button" class="btn btn-primary btn-sm" id="en-save">Save Changes</button>`);
+
+    const expIn = document.getElementById('en-exp');
+    document.querySelectorAll('[data-en-exp]').forEach(btn => {
+      btn.onclick = () => { expIn.value = btn.dataset.enExp; };
+    });
+    const ctxIn = document.getElementById('en-ctx');
+    bindContextSuggestionChips(ctxIn);
+
+    const valIn = document.getElementById('en-val');
+    if (isAffix && valIn) {
+      valIn.oninput = () => {
+        const pv = document.getElementById('en-affix-preview');
+        if (pv) pv.innerHTML = renderMcText(valIn.value);
+      };
+    }
+
+    document.getElementById('en-save').onclick = () => {
+      const nextExp = parseExpiryInput(expIn.value);
+      const nextCtx = parseContextsString(ctxIn.value);
+      const k = document.getElementById('en-key').value.trim();
+
+      if (isPerm) {
+        if (!k) return toast('Permission key cannot be empty', true);
+        row.ref.key = k;
+        row.ref.value = document.getElementById('en-bool').value === 'true';
+        if (nextExp) row.ref.expiry = nextExp; else delete row.ref.expiry;
+        if (nextCtx) row.ref.contexts = nextCtx; else delete row.ref.contexts;
+      } else if (isParent) {
+        row.ref.group = k.toLowerCase();
+        if (nextExp) row.ref.expiry = nextExp; else delete row.ref.expiry;
+        if (nextCtx) row.ref.contexts = nextCtx; else delete row.ref.contexts;
+      } else if (isAffix) {
+        row.ref.priority = parseInt(k || '0', 10) || 0;
+        row.ref.value = valIn.value;
+        if (nextExp) row.ref.expiry = nextExp; else delete row.ref.expiry;
+        if (nextCtx) row.ref.contexts = nextCtx; else delete row.ref.contexts;
+      } else if (isMeta) {
+        if (!k) return toast('Meta key cannot be empty', true);
+        const v = valIn.value;
+        if (row.ref) {
+          const oldKey = row.ref.key;
+          row.ref.key = k;
+          row.ref.value = v;
+          if (nextExp) row.ref.expiry = nextExp; else delete row.ref.expiry;
+          if (nextCtx) row.ref.contexts = nextCtx; else delete row.ref.contexts;
+          if (entity.meta && oldKey && oldKey !== k) delete entity.meta[oldKey];
+          if (!nextExp && !nextCtx) {
+            entity.meta = entity.meta || {};
+            entity.meta[k] = v;
+          }
+        } else {
+          delete entity.meta[row.metaKey];
+          if (!nextExp && !nextCtx) {
+            entity.meta[k] = v;
+          }
+          entity.metaEntries = entity.metaEntries || [];
+          entity.metaEntries.push({ key: k, value: v, ...(nextExp ? { expiry: nextExp } : {}), ...(nextCtx ? { contexts: nextCtx } : {}) });
+        }
+      }
+
       markDirty();
       closeModal();
       render();
@@ -1327,7 +1946,7 @@
   function bindEditorEvents() {
     const sbSearch = document.getElementById('input-sidebar-search');
     if (sbSearch) {
-      sbSearch.oninput = e => { STATE.sidebarQuery = e.target.value; render(); document.getElementById('input-sidebar-search').focus(); };
+      sbSearch.oninput = e => { STATE.sidebarQuery = e.target.value; render(); };
     }
     document.querySelectorAll('[data-toggle-sec]').forEach(el => {
       el.onclick = () => { const k = el.dataset.toggleSec; STATE.expandedSections[k] = !STATE.expandedSections[k]; render(); };
@@ -1363,8 +1982,10 @@
     if (!entity) return;
 
     const isGroup = STATE.selected.type === 'group';
-    const rows = buildUnifiedRows(entity, STATE.selected.type);
-    const rowById = Object.fromEntries(rows.map(r => [r.rowId, r]));
+    const ownRows = buildUnifiedRows(entity, STATE.selected.type);
+    const inheritedRows = buildInheritedRows(entity);
+    const allRows = STATE.showInherited ? ownRows.concat(inheritedRows) : ownRows;
+    const rowById = Object.fromEntries(allRows.map(r => [r.rowId, r]));
 
     const weightIn = document.getElementById('input-group-weight');
     if (weightIn) weightIn.onchange = e => { entity.weight = parseInt(e.target.value || '0', 10) || 0; markDirty(); render(); };
@@ -1372,6 +1993,14 @@
     if (dispIn) dispIn.onchange = e => { entity.displayName = e.target.value; markDirty(); render(); };
     const primSel = document.getElementById('select-user-primary');
     if (primSel) primSel.onchange = e => { entity.primaryGroup = e.target.value; markDirty(); render(); };
+
+    const copyUuid = document.getElementById('copy-user-uuid');
+    if (copyUuid) {
+      copyUuid.onclick = () => navigator.clipboard.writeText(entity.uuid).then(() => toast('Copied UUID'));
+    }
+
+    const btnCloneGroup = document.getElementById('btn-clone-group');
+    if (btnCloneGroup && isGroup) btnCloneGroup.onclick = () => openCloneGroupModal(entity);
 
     const btnDelEntity = document.getElementById('btn-delete-entity');
     if (btnDelEntity) {
@@ -1397,11 +2026,17 @@
             ${STATE.editor.groups.filter(g => !isGroup || g.name !== entity.name).map(g => `<option value="${esc(g.name)}">${esc(g.name)}</option>`).join('')}
           </select>
         </div>
-        <div class="field-group"><label>Contexts (optional, e.g. server=lobby)</label><input id="ap-ctx" class="field-input"></div>
+        <div class="field-group">
+          <label>Contexts (optional, e.g. server=lobby)</label>
+          <input id="ap-ctx" class="field-input">
+          ${buildContextSuggestionChips('ap-ctx')}
+        </div>
       `, `<button type="button" class="btn btn-primary btn-sm" id="ap-submit">Add Parent</button>`);
+      const ctxIn = document.getElementById('ap-ctx');
+      bindContextSuggestionChips(ctxIn);
       document.getElementById('ap-submit').onclick = () => {
         const g = document.getElementById('ap-group').value;
-        const ctxs = parseContextsString(document.getElementById('ap-ctx').value);
+        const ctxs = parseContextsString(ctxIn.value);
         entity.parents = entity.parents || [];
         entity.parents.push({ group: g, ...(ctxs ? { contexts: ctxs } : {}) });
         markDirty();
@@ -1415,13 +2050,33 @@
     });
 
     const nfInput = document.getElementById('input-nodes-filter');
-    if (nfInput) nfInput.oninput = e => { STATE.nodesFilter = e.target.value; render(); document.getElementById('input-nodes-filter').focus(); };
+    if (nfInput) nfInput.oninput = e => { STATE.nodesFilter = e.target.value; render(); };
+
+    const inhToggle = document.getElementById('btn-toggle-inherited');
+    if (inhToggle) inhToggle.onclick = () => { STATE.showInherited = !STATE.showInherited; render(); };
+
+    document.querySelectorAll('[data-type-filter]').forEach(btn => {
+      btn.onclick = () => { STATE.nodeTypeFilter = btn.dataset.typeFilter; STATE.checkedRows.clear(); render(); };
+    });
+
+    document.querySelectorAll('[data-sort-col]').forEach(th => {
+      th.onclick = () => {
+        const col = th.dataset.sortCol;
+        if (STATE.sortBy === col) {
+          if (STATE.sortDir === 1) STATE.sortDir = -1;
+          else STATE.sortBy = 'default';
+        } else {
+          STATE.sortBy = col;
+          STATE.sortDir = 1;
+        }
+        render();
+      };
+    });
 
     const chkAll = document.getElementById('chk-all-rows');
     if (chkAll) {
       chkAll.onchange = e => {
-        const visible = document.querySelectorAll('.row-chk');
-        visible.forEach(c => {
+        document.querySelectorAll('.row-chk').forEach(c => {
           if (e.target.checked) STATE.checkedRows.add(c.dataset.rowid);
           else STATE.checkedRows.delete(c.dataset.rowid);
         });
@@ -1435,6 +2090,75 @@
         render();
       };
     });
+
+    const bulkFlip = document.getElementById('btn-bulk-flip');
+    if (bulkFlip) {
+      bulkFlip.onclick = () => {
+        let changed = 0;
+        Array.from(STATE.checkedRows).forEach(id => {
+          const r = rowById[id];
+          if (r && r.toggleable && r.onToggle) { r.onToggle(); changed++; }
+        });
+        if (changed) toast(`Toggled ${changed} permission value${changed === 1 ? '' : 's'}`);
+        render();
+      };
+    }
+    const bulkCtx = document.getElementById('btn-bulk-contexts');
+    if (bulkCtx) {
+      bulkCtx.onclick = () => {
+        openModal(`Set Contexts on ${STATE.checkedRows.size} Node(s)`, `
+          <div class="field-group">
+            <label>Contexts (leave empty for global)</label>
+            <input id="bc-in" class="field-input" placeholder="e.g. server=lobby">
+            ${buildContextSuggestionChips('bc-in')}
+          </div>
+        `, `<button type="button" class="btn btn-primary btn-sm" id="bc-ok">Apply Contexts</button>`);
+        const ctxIn = document.getElementById('bc-in');
+        bindContextSuggestionChips(ctxIn);
+        document.getElementById('bc-ok').onclick = () => {
+          const nextCtx = parseContextsString(ctxIn.value);
+          Array.from(STATE.checkedRows).forEach(id => {
+            const r = rowById[id];
+            if (r && r.ref) {
+              if (nextCtx) r.ref.contexts = deepClone(nextCtx);
+              else delete r.ref.contexts;
+              markDirty();
+            }
+          });
+          closeModal();
+          render();
+        };
+      };
+    }
+    const bulkExp = document.getElementById('btn-bulk-expiry');
+    if (bulkExp) {
+      bulkExp.onclick = () => {
+        openModal(`Set Expiry on ${STATE.checkedRows.size} Node(s)`, `
+          <div class="field-group">
+            <label>Expiry (duration or 'never')</label>
+            <input id="be-in" class="field-input" value="7d">
+            <div class="preset-pills" style="margin-top:4px">
+              ${['never', '1h', '12h', '1d', '7d', '30d'].map(p => `<button type="button" class="preset-chip" data-be-exp="${p}">${p}</button>`).join('')}
+            </div>
+          </div>
+        `, `<button type="button" class="btn btn-primary btn-sm" id="be-ok">Apply Expiry</button>`);
+        const expIn = document.getElementById('be-in');
+        document.querySelectorAll('[data-be-exp]').forEach(btn => { btn.onclick = () => { expIn.value = btn.dataset.beExp; }; });
+        document.getElementById('be-ok').onclick = () => {
+          const nextExp = parseExpiryInput(expIn.value);
+          Array.from(STATE.checkedRows).forEach(id => {
+            const r = rowById[id];
+            if (r && r.ref) {
+              if (nextExp) r.ref.expiry = nextExp;
+              else delete r.ref.expiry;
+              markDirty();
+            }
+          });
+          closeModal();
+          render();
+        };
+      };
+    }
     const bulkDel = document.getElementById('btn-bulk-delete');
     if (bulkDel) {
       bulkDel.onclick = () => {
@@ -1447,6 +2171,15 @@
 
     document.querySelectorAll('[data-toggle-row]').forEach(btn => {
       btn.onclick = () => { const r = rowById[btn.dataset.toggleRow]; if (r && r.onToggle) { r.onToggle(); render(); } };
+    });
+    document.querySelectorAll('[data-edit-row]').forEach(btn => {
+      btn.onclick = () => { const r = rowById[btn.dataset.editRow]; if (r) openEditNodeModal(entity, r); };
+    });
+    document.querySelectorAll('[data-copy-inh]').forEach(btn => {
+      btn.onclick = () => {
+        const r = rowById[btn.dataset.copyInh];
+        if (r && r.copyPayload) { r.copyPayload(); toast(`Copied ${r.key} directly to target`); render(); }
+      };
     });
     document.querySelectorAll('[data-del-row]').forEach(btn => {
       btn.onclick = () => { const r = rowById[btn.dataset.delRow]; if (r) { r.onDelete(); render(); } };
@@ -1465,6 +2198,12 @@
     if (dPrio) dPrio.oninput = e => { STATE.addForm.priority = e.target.value; };
     if (dExp) dExp.oninput = e => { STATE.addForm.expiry = e.target.value; };
     if (dVal) dVal.onclick = () => { STATE.addForm.value = !STATE.addForm.value; render(); };
+    document.querySelectorAll('[data-dock-exp-preset]').forEach(btn => {
+      btn.onclick = () => {
+        STATE.addForm.expiry = btn.dataset.dockExpPreset;
+        if (dExp) dExp.value = STATE.addForm.expiry;
+      };
+    });
 
     const addNodeAction = () => {
       const t = STATE.addForm.type;
@@ -1514,49 +2253,14 @@
       render();
     };
 
-    if (dKey) {
-      dKey.onfocus = () => {
-        if (STATE.addForm.type === 'PERMISSION') {
-          STATE.acOpen = true;
-          STATE.acIndex = 0;
-          updateAutocompleteDom();
-        }
-      };
-      dKey.oninput = e => {
-        STATE.addForm.key = e.target.value;
-        STATE.acOpen = STATE.addForm.type === 'PERMISSION';
-        STATE.acIndex = 0;
-        updateAutocompleteDom();
-      };
-      dKey.onkeydown = e => {
-        const list = computeAutocomplete(STATE.addForm.key);
-        if (STATE.acOpen && list.length) {
-          if (e.key === 'ArrowDown') { e.preventDefault(); STATE.acIndex = (STATE.acIndex + 1) % list.length; updateAutocompleteDom(); return; }
-          if (e.key === 'ArrowUp') { e.preventDefault(); STATE.acIndex = (STATE.acIndex - 1 + list.length) % list.length; updateAutocompleteDom(); return; }
-          if (e.key === 'Escape') { STATE.acOpen = false; updateAutocompleteDom(); return; }
-          if (e.key === 'Enter' && STATE.acIndex >= 0 && list[STATE.acIndex] && STATE.addForm.key.trim() !== list[STATE.acIndex]) {
-            e.preventDefault();
-            STATE.addForm.key = list[STATE.acIndex];
-            dKey.value = STATE.addForm.key;
-            STATE.acOpen = false;
-            updateAutocompleteDom();
-            return;
-          }
-        }
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          addNodeAction();
-        }
-      };
-    }
-
     const updateAutocompleteDom = () => {
       const col = dKey && dKey.parentElement;
       if (!col) return;
       const old = document.getElementById('ac-popover');
       if (old) old.remove();
-      const list = computeAutocomplete(STATE.addForm.key);
-      if (!STATE.acOpen || !list.length || STATE.addForm.type !== 'PERMISSION') return;
+      const canAc = STATE.addForm.type === 'PERMISSION' || STATE.addForm.type === 'INHERITANCE';
+      const list = computeAutocomplete(STATE.addForm.key, STATE.addForm.type, entity);
+      if (!STATE.acOpen || !list.length || !canAc) return;
       const pop = document.createElement('div');
       pop.className = 'autocomplete-popover';
       pop.id = 'ac-popover';
@@ -1578,13 +2282,67 @@
       });
     };
 
+    if (dKey) {
+      dKey.onfocus = () => {
+        if (STATE.addForm.type === 'PERMISSION' || STATE.addForm.type === 'INHERITANCE') {
+          STATE.acOpen = true;
+          STATE.acIndex = 0;
+          updateAutocompleteDom();
+        }
+      };
+      dKey.onblur = () => {
+        setTimeout(() => { STATE.acOpen = false; updateAutocompleteDom(); }, 120);
+      };
+      dKey.oninput = e => {
+        STATE.addForm.key = e.target.value;
+        STATE.acOpen = STATE.addForm.type === 'PERMISSION' || STATE.addForm.type === 'INHERITANCE';
+        STATE.acIndex = 0;
+        updateAutocompleteDom();
+        const affixPrev = document.getElementById('dock-affix-preview');
+        if (affixPrev) {
+          affixPrev.innerHTML = renderMcText(e.target.value) || '<span style="color:var(--text-dim)">preview</span>';
+        }
+      };
+      dKey.onkeydown = e => {
+        const list = computeAutocomplete(STATE.addForm.key, STATE.addForm.type, entity);
+        if (STATE.acOpen && list.length) {
+          if (e.key === 'ArrowDown') { e.preventDefault(); STATE.acIndex = (STATE.acIndex + 1) % list.length; updateAutocompleteDom(); return; }
+          if (e.key === 'ArrowUp') { e.preventDefault(); STATE.acIndex = (STATE.acIndex - 1 + list.length) % list.length; updateAutocompleteDom(); return; }
+          if (e.key === 'Escape') { STATE.acOpen = false; updateAutocompleteDom(); return; }
+          if (e.key === 'Enter' && STATE.acIndex >= 0 && list[STATE.acIndex] && STATE.addForm.key.trim() !== list[STATE.acIndex]) {
+            e.preventDefault();
+            STATE.addForm.key = list[STATE.acIndex];
+            dKey.value = STATE.addForm.key;
+            STATE.acOpen = false;
+            updateAutocompleteDom();
+            return;
+          }
+        }
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          addNodeAction();
+        }
+      };
+    }
+
     document.getElementById('btn-dock-add').onclick = addNodeAction;
     document.getElementById('btn-dock-ctx').onclick = () => {
       const pot = (STATE.editor.potentialContexts && STATE.editor.potentialContexts.server) || ['lobby', 'survival'];
       openModal('Add Context Constraint', `
         <div class="field-group"><label>Key (e.g. server, world)</label><input id="dc-k" class="field-input" value="server"></div>
         <div class="field-group"><label>Value (suggestions: ${esc(pot.join(', '))})</label><input id="dc-v" class="field-input" value="${esc(pot[0] || '')}"></div>
+        ${buildContextSuggestionChips('dc-pair')}
       `, `<button type="button" class="btn btn-primary btn-sm" id="dc-ok">Add Context</button>`);
+      document.querySelectorAll('[data-ctx-suggest]').forEach(btn => {
+        btn.onclick = () => {
+          const pair = btn.dataset.ctxSuggest;
+          const idx = pair.indexOf('=');
+          if (idx > 0) {
+            document.getElementById('dc-k').value = pair.slice(0, idx);
+            document.getElementById('dc-v').value = pair.slice(idx + 1);
+          }
+        };
+      });
       document.getElementById('dc-ok').onclick = () => {
         const ck = document.getElementById('dc-k').value.trim().toLowerCase();
         const cv = document.getElementById('dc-v').value.trim();
@@ -1600,10 +2358,31 @@
 
   function bindViewerAndWikiEvents() {
     const vf = document.getElementById('input-verbose-filter');
-    if (vf) vf.oninput = e => { STATE.verboseFilter = e.target.value; render(); document.getElementById('input-verbose-filter').focus(); };
+    if (vf) vf.oninput = e => { STATE.verboseFilter = e.target.value; render(); };
     document.querySelectorAll('[data-verbose-ex]').forEach(chk => {
       chk.onchange = () => { STATE.verboseExclude[chk.dataset.verboseEx] = chk.checked; render(); };
     });
+    const vExpAll = document.getElementById('btn-verbose-expand-all');
+    if (vExpAll) {
+      vExpAll.onclick = () => {
+        document.querySelectorAll('[data-verbose-idx]').forEach(r => STATE.verboseExpanded.add(Number(r.dataset.verboseIdx)));
+        render();
+      };
+    }
+    const vColAll = document.getElementById('btn-verbose-collapse-all');
+    if (vColAll) {
+      vColAll.onclick = () => { STATE.verboseExpanded.clear(); render(); };
+    }
+    const vDl = document.getElementById('btn-verbose-download');
+    if (vDl && STATE.verbose) {
+      vDl.onclick = () => {
+        const blob = new Blob([JSON.stringify(STATE.verbose, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'stonyperms-verbose.json';
+        a.click();
+      };
+    }
     document.querySelectorAll('[data-verbose-idx]').forEach(row => {
       row.onclick = () => {
         const i = Number(row.dataset.verboseIdx);
@@ -1614,7 +2393,7 @@
     });
 
     const tf = document.getElementById('input-tree-filter');
-    if (tf) tf.oninput = e => { STATE.treeFilter = e.target.value; render(); document.getElementById('input-tree-filter').focus(); };
+    if (tf) tf.oninput = e => { STATE.treeFilter = e.target.value; render(); };
     const bExp = document.getElementById('btn-tree-expand');
     if (bExp) bExp.onclick = () => { STATE.treeCollapsed.clear(); render(); };
     const bCol = document.getElementById('btn-tree-collapse');
@@ -1623,7 +2402,8 @@
       render();
     };
     document.querySelectorAll('[data-tree-toggle]').forEach(el => {
-      el.onclick = () => {
+      el.onclick = ev => {
+        if (ev.target.closest('button')) return;
         const p = el.dataset.treeToggle;
         if (STATE.treeCollapsed.has(p)) STATE.treeCollapsed.delete(p);
         else STATE.treeCollapsed.add(p);
@@ -1631,7 +2411,23 @@
       };
     });
     document.querySelectorAll('[data-copy-node]').forEach(el => {
-      el.onclick = () => navigator.clipboard.writeText(el.dataset.copyNode).then(() => toast('Copied ' + el.dataset.copyNode));
+      el.onclick = ev => {
+        if (ev.target.closest('[data-use-tree-node]')) return;
+        ev.stopPropagation();
+        navigator.clipboard.writeText(el.dataset.copyNode).then(() => toast('Copied ' + el.dataset.copyNode));
+      };
+    });
+    document.querySelectorAll('[data-use-tree-node]').forEach(btn => {
+      btn.onclick = ev => {
+        ev.stopPropagation();
+        STATE.addForm.type = 'PERMISSION';
+        STATE.addForm.key = btn.dataset.useTreeNode;
+        if (!STATE.selected && STATE.editor && STATE.editor.groups.length) {
+          STATE.selected = { type: 'group', id: STATE.editor.groups[0].name };
+        }
+        toast('Pre-filled ' + btn.dataset.useTreeNode + ' in Editor');
+        navigate('/editor');
+      };
     });
 
     document.querySelectorAll('[data-wiki-slug]').forEach(btn => {
@@ -1640,6 +2436,18 @@
   }
 
   function render() {
+    // Capture focus, selection, and scroll offsets across re-render
+    const active = document.activeElement;
+    const activeId = active && active.id ? active.id : '';
+    const selStart = active && typeof active.selectionStart === 'number' ? active.selectionStart : null;
+    const selEnd = active && typeof active.selectionEnd === 'number' ? active.selectionEnd : null;
+
+    const scrollSelectors = ['.sidebar-scroll', '.editor-body', '.viewer-main', '.wiki-sidebar', '.wiki-article'];
+    const scrolls = scrollSelectors.map(sel => {
+      const node = document.querySelector(sel);
+      return [sel, node ? node.scrollTop : 0];
+    });
+
     updateModePill();
     document.querySelectorAll('[data-route]').forEach(a => a.classList.toggle('active', a.getAttribute('data-route') === STATE.route));
     const app = document.getElementById('app');
@@ -1653,6 +2461,27 @@
     bindCommonActions();
     if (STATE.route === '/editor' && STATE.editor) bindEditorEvents();
     bindViewerAndWikiEvents();
+
+    // Restore scroll offsets & active input focus/cursor position
+    for (const [sel, top] of scrolls) {
+      const node = document.querySelector(sel);
+      if (node && top) node.scrollTop = top;
+    }
+    if (activeId) {
+      const target = document.getElementById(activeId);
+      if (target) {
+        target.focus({ preventScroll: true });
+        if (selStart !== null && typeof target.setSelectionRange === 'function') {
+          try { target.setSelectionRange(selStart, selEnd); } catch {}
+        }
+      }
+    }
+
+    if (STATE.route === '/editor' && STATE.pendingTrackModal) {
+      const tn = STATE.pendingTrackModal;
+      STATE.pendingTrackModal = '';
+      openEditTrackModal(tn);
+    }
   }
 
   async function init() {
@@ -1661,7 +2490,6 @@
     STATE.wikiSlug = loc.subSlug || 'home';
     const apiBase = resolveApiOrigin(loc.api);
 
-    // Navbar controls
     document.getElementById('nav-brand').onclick = e => { e.preventDefault(); navigate('/'); };
     document.getElementById('btn-global-search').onclick = openSearchModal;
     document.getElementById('nav-download').onclick = openDownloadModal;
@@ -1672,8 +2500,17 @@
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         openSearchModal();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's' && STATE.route === '/editor' && STATE.editor) {
+        e.preventDefault();
+        openSaveModal();
       } else if (e.key === 'Escape') {
         closeModal();
+      }
+    });
+    window.addEventListener('beforeunload', e => {
+      if (STATE.dirtyCount > 0 && STATE.mode === 'live') {
+        e.preventDefault();
+        e.returnValue = '';
       }
     });
     window.addEventListener('popstate', () => {

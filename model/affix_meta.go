@@ -19,7 +19,7 @@ const (
 // ErrTempEntryExists is returned when TempModifierDeny encounters an active matching entry.
 var ErrTempEntryExists = errors.New("matching temporary entry already exists")
 
-// ParseTempModifier parses a LuckPerms-style temporary modifier keyword.
+// ParseTempModifier parses a temporary entry collision modifier keyword.
 func ParseTempModifier(raw string) (TempModifier, bool) {
 	switch TempModifier(strings.ToLower(strings.TrimSpace(raw))) {
 	case TempModifierReplace:

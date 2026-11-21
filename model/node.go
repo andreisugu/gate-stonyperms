@@ -116,7 +116,7 @@ func (n Node) MatchesContext(queryContexts map[string]string) bool {
 
 const maxShorthandExpansions = 128
 
-// ExpandShorthand expands LuckPerms-style shorthand patterns such as "{a,b}",
+// ExpandShorthand expands shorthand permission patterns such as "{a,b}",
 // "(a|b)", and integer ranges "{1-5}" up to maxShorthandExpansions items.
 // Regex keys prefixed with "r=" are returned unmodified.
 func ExpandShorthand(pattern string) []string {
@@ -222,7 +222,7 @@ func expandShorthandSegment(inner string) []string {
 
 // EvaluateNodeMatch checks if nodeKey matches targetPerm and returns
 // (matched, isExact, specificityScore). Supports literal nodes, "*", sub-wildcards ("gate.*"),
-// LuckPerms shorthand ("{a,b}", "(a|b)", "{1-20}"), and regex ("r=...").
+// Shorthand patterns ("{a,b}", "(a|b)", "{1-20}"), and regex ("r=...").
 func EvaluateNodeMatch(nodeKey, targetPerm string) (bool, bool, int) {
 	k := strings.TrimSpace(nodeKey)
 	t := strings.ToLower(strings.TrimSpace(targetPerm))

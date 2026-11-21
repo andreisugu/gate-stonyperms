@@ -5,12 +5,13 @@ window.STONYPERMS_WIKI = [
     title: "Home",
     html: `
       <h1>StonyPerms Documentation</h1>
-      <p><strong>StonyPerms</strong> is a lightweight, high-performance permissions plugin built natively for <strong>Minekube Gate</strong>, paired with <strong>StonyPermsBridge</strong> for Paper and Fabric backend servers and <strong>StonyPermsWeb</strong> for visual permission management.</p>
+      <p><strong>StonyPerms</strong> is a lightweight, high-performance permissions engine built natively for <strong>Minekube Gate</strong>, paired with <strong>StonyPermsBridge</strong> for Paper and Fabric backend servers and <strong>StonyPermsWeb</strong> for visual permission management.</p>
       <h2>Highlights</h2>
       <ul>
         <li>Weighted group inheritance trees with cycle detection</li>
-        <li>Promotion &amp; demotion progression tracks (<code>donors</code>, <code>staff</code>)</li>
-        <li>Server &amp; custom context conditions (<code>server=lobby</code>, <code>world=hub</code>)</li>
+        <li>Promotion &amp; demotion progression tracks (<code>donors</code>, <code>staff</code>) with clone &amp; web editor links</li>
+        <li>Server &amp; custom context conditions (<code>server=lobby</code>, <code>world=hub</code>) with specificity tie-breaking</li>
+        <li>Shorthand patterns (<code>{a,b}</code>, <code>(a|b)</code>, <code>{1-N}</code>) and regex permission matching (<code>r=...</code>)</li>
         <li>Read/Write HTTP API (<code>/v1/*</code>) with SSE live invalidation &amp; idempotency keys</li>
         <li>Built-in <strong>StonyPermsWeb</strong> UI: Web Editor, Verbose Viewer &amp; Permission Tree</li>
       </ul>
@@ -59,6 +60,7 @@ window.STONYPERMS_WIKI = [
         <thead><tr><th>Key</th><th>Default</th><th>Description</th></tr></thead>
         <tbody>
           <tr><td><code>default_group</code></td><td><code>"default"</code></td><td>Fallback group for players with no stored data</td></tr>
+          <tr><td><code>primary_group_calculation</code></td><td><code>"stored"</code></td><td>Primary group resolution strategy: <code>stored</code>, <code>parents-by-weight</code>, or <code>all-parents-by-weight</code></td></tr>
           <tr><td><code>storage_dir</code></td><td><code>"plugins/stonyperms/data"</code></td><td>Directory holding groups, tracks, users JSON files</td></tr>
           <tr><td><code>api_enabled</code></td><td><code>false</code></td><td>Enables HTTP API &amp; embedded StonyPermsWeb on <code>api_listen</code></td></tr>
           <tr><td><code>api_listen</code></td><td><code>"127.0.0.1:8737"</code></td><td>TCP bind address for HTTP API + Web UI</td></tr>
@@ -155,10 +157,14 @@ window.STONYPERMS_WIKI = [
     html: `
       <h1>Track Commands</h1>
       <pre><code>/sp createtrack &lt;track&gt;
+/sp track &lt;track&gt; info
+/sp track &lt;track&gt; editor
+/sp track &lt;track&gt; clone &lt;newName&gt;
 /sp track &lt;track&gt; append &lt;group&gt;
 /sp track &lt;track&gt; insert &lt;group&gt; &lt;1-based-pos&gt;
 /sp track &lt;track&gt; remove &lt;group&gt;
-/sp track &lt;track&gt; info</code></pre>
+/sp track &lt;track&gt; rename &lt;newName&gt;
+/sp track &lt;track&gt; clear</code></pre>
     `
   },
   {
@@ -176,6 +182,20 @@ window.STONYPERMS_WIKI = [
   },
   {
     category: "FEATURES",
+    slug: "matching-and-specificity",
+    title: "Matching & Specificity",
+    html: `
+      <h1>Permission Matching &amp; Context Specificity</h1>
+      <p>StonyPerms evaluates user nodes first, followed by inherited groups in descending weight order. Within any source, exact matches beat wildcards/patterns, and ties break by context specificity (<code>len(contexts)</code>) before explicit deny (<code>false</code>) overrides:</p>
+      <ul>
+        <li><strong>Exact &amp; Wildcards:</strong> <code>essentials.fly</code>, <code>essentials.*</code>, and global <code>*</code>.</li>
+        <li><strong>Shorthand Patterns:</strong> <code>essentials.{home,warp}</code>, <code>plugin.(kick|ban)</code>, and numeric ranges <code>homes.{1-10}</code> (up to 128 expansions).</li>
+        <li><strong>Regex Matching:</strong> Prefix any node key with <code>r=</code> for case-insensitive regular expressions, e.g. <code>r=arena\.\d+\.join</code>.</li>
+      </ul>
+    `
+  },
+  {
+    category: "FEATURES",
     slug: "prefixes-suffixes-meta",
     title: "Prefixes, Suffixes & Meta",
     html: `
@@ -189,7 +209,7 @@ window.STONYPERMS_WIKI = [
     title: "Contexts",
     html: `
       <h1>Contextual Permissions</h1>
-      <p>Restrict permissions, inheritance, custom metadata keys, prefixes, or suffixes to specific servers or worlds using key-value contexts like <code>server=lobby</code> or <code>world=world_nether</code>. Nodes with no contexts apply globally across the proxy and all connected backend servers.</p>
+      <p>Restrict permissions, inheritance, custom metadata keys, prefixes, or suffixes to specific servers or worlds using key-value contexts like <code>server=lobby</code> or <code>world=world_nether</code>. Nodes with more matching context pairs take precedence over broader global nodes within the same entity.</p>
     `
   },
   {
@@ -198,7 +218,7 @@ window.STONYPERMS_WIKI = [
     title: "Promotion Tracks",
     html: `
       <h1>Promotion Tracks</h1>
-      <p>Tracks define ordered promotion paths such as <code>default -&gt; helper -&gt; mod -&gt; admin</code>. Both <code>/sp user &lt;u&gt; promote &lt;track&gt;</code> and <code>POST /v1/users/{id}/promote</code> enforce atomic transitions.</p>
+      <p>Tracks define ordered promotion paths such as <code>default -&gt; helper -&gt; mod -&gt; admin</code>. Both <code>/sp user &lt;u&gt; promote &lt;track&gt;</code> and <code>POST /v1/users/{id}/promote</code> enforce atomic transitions. You can also assign or clear explicit group positions along a track via <code>settrack</code> / <code>cleartrack</code>, clone tracks with <code>/sp track &lt;t&gt; clone &lt;new&gt;</code>, or jump straight into the visual editor with <code>/sp track &lt;t&gt; editor</code>.</p>
     `
   },
   {
@@ -207,10 +227,11 @@ window.STONYPERMS_WIKI = [
     title: "Web Editor",
     html: `
       <h1>Web Permissions Editor</h1>
-      <p>Launch from Gate (<code>/sp editor</code>) or backend servers (<code>/spb editor</code>), or jump straight into a target with <code>/sp user &lt;name&gt; editor</code> or <code>/sp group &lt;name&gt; editor</code>.</p>
+      <p>Launch from Gate (<code>/sp editor</code>) or backend servers (<code>/spb editor</code>), or jump straight into a target with <code>/sp user &lt;name&gt; editor</code>, <code>/sp group &lt;name&gt; editor</code>, or <code>/sp track &lt;name&gt; editor</code>.</p>
       <ul>
-        <li><strong>Live Save mode:</strong> When Gate HTTP API is reachable, clicking <strong>Save</strong> applies changes immediately via <code>POST /v1/editor/sessions/{token}/save</code> and triggers SSE reload across backends.</li>
-        <li><strong>Offline / Portable mode:</strong> Generates a compact gzipped <code>sp1_...</code> code you can paste back in game via <code>/sp applyedits &lt;code&gt;</code> or <code>/spb applyedits &lt;code&gt;</code>.</li>
+        <li><strong>Live Color &amp; Inherited Inspector:</strong> Preview resolved chat/tab prefixes in real time and inspect inherited permissions from parent groups with one-click overrides.</li>
+        <li><strong>Live Save (<code>Ctrl+S</code>):</strong> When Gate HTTP API is reachable, clicking <strong>Save</strong> applies changes immediately via <code>POST /v1/editor/sessions/{token}/save</code> and broadcasts SSE updates across backends.</li>
+        <li><strong>Portable Offline Mode:</strong> Generates a compact gzipped <code>sp1_...</code> code you can apply in game via <code>/sp applyedits &lt;code&gt;</code> or <code>/spb applyedits &lt;code&gt;</code>.</li>
       </ul>
     `
   },
@@ -224,7 +245,7 @@ window.STONYPERMS_WIKI = [
       <pre><code>/sp verbose record [target] [filter]
 ... perform checks or reproduce bug ...
 /sp verbose paste</code></pre>
-      <p>Filter results by permission substring, user/subject, or exclude <code>true</code> / <code>false</code> / <code>undefined</code> results.</p>
+      <p>Filter results by permission substring, user/subject, or exclude <code>true</code> / <code>false</code> / <code>undefined</code> results, inspect evaluation traces, and download JSON captures.</p>
     `
   },
   {
@@ -245,8 +266,8 @@ window.STONYPERMS_WIKI = [
     html: `
       <h1>HTTP API Reference</h1>
       <ul>
-        <li><strong>Read endpoints (read bearer token):</strong> <code>GET /v1/health</code>, <code>GET /v1/players/{uuid}</code>, <code>POST /v1/check</code>, <code>GET /v1/users</code>, <code>GET /v1/groups</code>, <code>GET /v1/tracks</code>, <code>GET /v1/logs</code>, <code>GET /v1/events</code> (SSE)</li>
-        <li><strong>Write endpoints (write bearer token + <code>api_write_enabled</code>):</strong> Full CRUD for users, groups, tracks, promote/demote, plus <code>POST /v1/editor/sessions</code>, <code>POST /v1/editor/applyedits</code>, <code>POST /v1/verbose/sessions</code>, <code>POST /v1/tree/sessions</code></li>
+        <li><strong>Read endpoints (read bearer token):</strong> <code>GET /v1/health</code>, <code>GET /v1/players/{uuid}</code>, <code>POST /v1/check</code>, <code>GET /v1/search?q=...</code>, <code>GET /v1/users</code>, <code>GET /v1/groups</code>, <code>GET /v1/tracks</code>, <code>GET /v1/logs</code>, <code>GET /v1/events</code> (SSE)</li>
+        <li><strong>Write endpoints (write bearer token + <code>api_write_enabled</code>):</strong> Full CRUD for users, groups, tracks, promote/demote, <code>POST /v1/bulkupdate</code>, track set/clear routes, temp modifiers (<code>accumulate|replace|deny</code>) &amp; <code>tempOnly</code> deletes, plus <code>POST /v1/editor/sessions</code>, <code>POST /v1/editor/applyedits</code>, <code>POST /v1/verbose/sessions</code>, <code>POST /v1/tree/sessions</code></li>
         <li><strong>Web UI Session endpoints (ephemeral token + CORS):</strong> <code>GET /v1/editor/sessions/{token}</code>, <code>POST /v1/editor/sessions/{token}/save</code>, <code>GET /v1/verbose/sessions/{token}</code>, <code>GET /v1/tree/sessions/{token}</code></li>
       </ul>
     `
@@ -257,7 +278,7 @@ window.STONYPERMS_WIKI = [
     title: "StonyPermsBridge",
     html: `
       <h1>StonyPermsBridge (Paper &amp; Fabric)</h1>
-      <p>Installs directly onto Paper/Folia and Fabric backends to hook native permission lookups, Vault prefixes/suffixes, and forward <code>/spb</code> commands (including <code>/spb editor</code>, <code>/spb applyedits</code>, and <code>/spb tree</code>) directly to Gate's authoritative HTTP API.</p>
+      <p>Installs directly onto Paper/Folia and Fabric backends to hook native permission lookups, Vault prefixes/suffixes, PlaceholderAPI placeholders (<code>%stonyperms_*%</code>), and forward <code>/spb</code> commands (including <code>search</code>, <code>bulkupdate</code>, <code>sync</code>, <code>editor</code>, <code>applyedits</code>, and <code>tree</code>) directly to Gate's authoritative HTTP API.</p>
     `
   }
 ];
