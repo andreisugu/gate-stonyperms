@@ -809,3 +809,43 @@ func TestIdempotencyCacheTTLEvictionAndGroupDeleteForms(t *testing.T) {
 		t.Fatalf("delete suffix failed: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestIdempotencyQueryParameterCanonicalizationAndConflict(t *testing.T) {
+	srv, mgr := newWriteTestServer(t)
+	h := srv.Handler()
+
+	uid := uuid.New()
+	_, _, err := mgr.MutateUser(uid, "QueryIdemp", true, "default", "seed", func(u *model.User) (bool, string, error) {
+		u.AddNode(model.Node{Key: "perm.a", Value: true, Contexts: map[string]string{"server": "lobby"}})
+		u.AddNode(model.Node{Key: "perm.b", Value: true, Contexts: map[string]string{"server": "lobby"}})
+		return true, "seed perms", nil
+	})
+	if err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+
+	// 1. Delete perm.a with query parameters and Idempotency-Key.
+	r1 := doWriteRequest(t, h, http.MethodDelete, "/v1/users/"+uid.String()+"/permissions?key=perm.a&server=lobby", testWriteToken, "ops", "del-q-1", nil)
+	if r1.Code != http.StatusOK || r1.Header().Get("X-Idempotency-Replayed") != "" {
+		t.Fatalf("initial query delete failed: code=%d hdr=%q body=%s", r1.Code, r1.Header().Get("X-Idempotency-Replayed"), r1.Body.String())
+	}
+	revAfterFirst := mgr.Revision()
+
+	// 2. Reordered identical query parameters + same Idempotency-Key replays cleanly.
+	r2 := doWriteRequest(t, h, http.MethodDelete, "/v1/users/"+uid.String()+"/permissions?server=lobby&key=perm.a", testWriteToken, "ops", "del-q-1", nil)
+	if r2.Code != http.StatusOK || r2.Header().Get("X-Idempotency-Replayed") != "true" || r2.Body.String() != r1.Body.String() {
+		t.Fatalf("reordered query replay mismatch: code=%d hdr=%q body=%s", r2.Code, r2.Header().Get("X-Idempotency-Replayed"), r2.Body.String())
+	}
+	if mgr.Revision() != revAfterFirst {
+		t.Fatal("replayed query delete mutated manager revision")
+	}
+
+	// 3. Different query parameter (?key=perm.b) with same Idempotency-Key returns 409 and preserves perm.b.
+	r3 := doWriteRequest(t, h, http.MethodDelete, "/v1/users/"+uid.String()+"/permissions?key=perm.b&server=lobby", testWriteToken, "ops", "del-q-1", nil)
+	assertErrorCode(t, r3, http.StatusConflict, "idempotency_conflict")
+
+	snap, found, _ := mgr.UserSnapshot(uid)
+	if !found || len(snap.Nodes) != 1 || snap.Nodes[0].Key != "perm.b" {
+		t.Fatalf("expected perm.b to remain untouched after conflict, got %+v", snap)
+	}
+}
