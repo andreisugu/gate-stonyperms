@@ -247,3 +247,56 @@ type failingGroupStorage struct {
 func (f failingGroupStorage) SaveGroup(*model.Group) error {
 	return f.err
 }
+
+func TestGatePermissionFuncSyntheticGroups(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := storage.NewJSONStorage(filepath.Join(tmpDir, "stonyperms"))
+	mgr, err := New(store)
+	if err != nil {
+		t.Fatalf("new manager: %v", err)
+	}
+	defer mgr.Close()
+
+	_, _ = mgr.CreateGroup("default", 0, "&7")
+	_, _ = mgr.CreateGroup("vip", 100, "&a[VIP] ")
+	eliteGroup, _ := mgr.CreateGroup("elite", 120, "&6[Elite] ")
+	eliteCopy := mgr.GetGroupCopy(eliteGroup.Name)
+	eliteCopy.AddParent(model.NewInheritance("default"))
+	if err := mgr.SaveGroup(eliteCopy); err != nil {
+		t.Fatalf("save elite group: %v", err)
+	}
+
+	id := uuid.New()
+	_ = mgr.GetOrCreateUser(id, "RankPlayer")
+	u := mgr.GetUserCopy(id)
+	u.PrimaryGroup = "elite"
+	u.AddParent(model.NewInheritance("vip"))
+	// Explicit negation should still win over synthetic group permission.
+	u.AddNode(model.NewNode("group.vip", false))
+	if err := mgr.SaveUser(u); err != nil {
+		t.Fatalf("save user: %v", err)
+	}
+
+	permFn := mgr.GatePermissionFunc(id, func() map[string]string {
+		return map[string]string{"server": "lobby"}
+	})
+
+	if got := permFn("stonyperms.primarygroup.elite"); got != permission.True {
+		t.Fatalf("expected stonyperms.primarygroup.elite True, got %v", got)
+	}
+	if got := permFn("bettertab.role.elite"); got != permission.True {
+		t.Fatalf("expected bettertab.role.elite True, got %v", got)
+	}
+	if got := permFn("bettertab.role.default"); got != permission.Undefined {
+		t.Fatalf("expected bettertab.role.default Undefined, got %v", got)
+	}
+	if got := permFn("stonyperms.group.elite"); got != permission.True {
+		t.Fatalf("expected stonyperms.group.elite True, got %v", got)
+	}
+	if got := permFn("group.default"); got != permission.True {
+		t.Fatalf("expected group.default True via inheritance, got %v", got)
+	}
+	if got := permFn("group.vip"); got != permission.False {
+		t.Fatalf("expected explicit negation group.vip False, got %v", got)
+	}
+}

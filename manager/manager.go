@@ -995,9 +995,51 @@ func (m *Manager) GatePermissionFunc(userID uuid.UUID, contextProvider func() ma
 		case model.False:
 			return permission.False
 		default:
-			return permission.Undefined
+			return m.syntheticGroupPermission(userID, perm, ctxs)
 		}
 	}
+}
+
+func (m *Manager) syntheticGroupPermission(userID uuid.UUID, perm string, ctxs map[string]string) permission.TriState {
+	clean := strings.ToLower(strings.TrimSpace(perm))
+	switch {
+	case strings.HasPrefix(clean, "stonyperms.primarygroup."):
+		return m.matchesEffectiveGroup(userID, strings.TrimPrefix(clean, "stonyperms.primarygroup."), ctxs, true)
+	case strings.HasPrefix(clean, "bettertab.role."):
+		return m.matchesEffectiveGroup(userID, strings.TrimPrefix(clean, "bettertab.role."), ctxs, true)
+	case strings.HasPrefix(clean, "group."):
+		return m.matchesEffectiveGroup(userID, strings.TrimPrefix(clean, "group."), ctxs, false)
+	case strings.HasPrefix(clean, "stonyperms.group."):
+		return m.matchesEffectiveGroup(userID, strings.TrimPrefix(clean, "stonyperms.group."), ctxs, false)
+	default:
+		return permission.Undefined
+	}
+}
+
+func (m *Manager) matchesEffectiveGroup(userID uuid.UUID, target string, ctxs map[string]string, primaryOnly bool) permission.TriState {
+	if target == "" {
+		return permission.Undefined
+	}
+	eff, ok, _ := m.EffectiveUser(userID, ctxs, "default")
+	if !ok || eff == nil {
+		return permission.Undefined
+	}
+	primary := strings.ToLower(strings.TrimSpace(eff.PrimaryGroup))
+	if primary == "" {
+		primary = "default"
+	}
+	if primary == target {
+		return permission.True
+	}
+	if primaryOnly {
+		return permission.Undefined
+	}
+	for _, g := range eff.Groups {
+		if strings.EqualFold(g.Name, target) {
+			return permission.True
+		}
+	}
+	return permission.Undefined
 }
 
 // GetPrefix gets the active prefix for a user.
