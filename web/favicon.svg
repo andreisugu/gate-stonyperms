@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <circle cx="32" cy="32" r="30" fill="#94df03"/>
+  <circle cx="32" cy="32" r="24" fill="#181a1f"/>
+  <path d="M32 13L47 21.5V35.5C47 44.5 40.6 51.2 32 54C23.4 51.2 17 44.5 17 35.5V21.5L32 13Z" fill="#94df03"/>
+  <text x="32" y="39" font-family="Inter,system-ui,sans-serif" font-weight="900" font-size="16" text-anchor="middle" fill="#181a1f">SP</text>
+</svg>

@@ -417,3 +417,32 @@ Supported `POST /v1/users/{id}/batch` operation names (`op`):
 | `429 Too Many Requests` | `rate_limited` (includes `Retry-After: 1`) |
 | `500 Internal Server Error` | `internal_error` (details logged server-side only) |
 | `503 Service Unavailable` | `sse_disabled`, `sse_capacity_exceeded` |
+
+
+---
+
+## StonyPermsWeb Session & UI Endpoints
+
+When `api_enabled = true`, Gate embeds the full static **StonyPermsWeb** UI (`web/embed.go`) on `/` (plus SPA entrypoints `/editor`, `/verbose`, `/tree`, `/wiki` and static assets `/styles.css`, `/app.js`, `/demo-data.js`, `/wiki-data.js`, `/favicon.svg`), and sets `api_editor_public_url` (optional TOML override) as the public link origin.
+
+### Write-Tier Session Creation & Portable Apply (`Write-Tier Auth`)
+
+| Method & Path | Body | Response |
+| --- | --- | --- |
+| `POST /v1/editor/sessions` | `{"actor":"PaperBridge","commandAlias":"spb","targetType":"all\|user\|group","target":"","filter":"","extraPermissions":[],"extraContexts":{}}` | `201` `{token, url, expiresAt, liveSave}` |
+| `POST /v1/editor/applyedits` | `{"code":"sp1_... or sp_...","actor":"..."}` | `200` `{applied, revision, groupsUpdated, groupsDeleted, tracksUpdated, tracksDeleted, usersUpdated, usersDeleted}` |
+| `POST /v1/verbose/sessions` | `{"actor":"...","commandAlias":"spb"}` | `201` `{token, url, expiresAt, count}` |
+| `POST /v1/tree/sessions` | `{"actor":"...","commandAlias":"spb","root":".","extraPermissions":[]}` | `201` `{token, url, expiresAt, count}` |
+
+### Ephemeral Browser Session Routes (Token-Authenticated + CORS Enabled)
+
+Only these 4 browser session endpoints emit `Access-Control-Allow-Origin: *` (and `OPTIONS` preflight); standard bearer `/v1/*` API endpoints never emit CORS wildcards. Each ephemeral 128-bit session token expires after `2h` (max `128` sessions).
+
+| Method & Path | Description |
+| --- | --- |
+| `GET /v1/editor/sessions/{token}` | Fetch editor snapshot (`metadata`, `groups`, `tracks`, `users`, `knownPermissions`, `potentialContexts`) |
+| `POST /v1/editor/sessions/{token}/save` | Validate and apply live editor edits atomically (`2 MiB` max body); returns summary + short `sp_` apply code fallback |
+| `GET /v1/verbose/sessions/{token}` | Fetch recorded verbose checks (`max 2000` entries) |
+| `GET /v1/tree/sessions/{token}` | Fetch sorted permission list and root metadata for Tree Viewer |
+
+Portable `sp1_` payloads are gzipped JSON encoded as `base64url` and strictly bounded to `64 KiB` decompressed bytes (`io.LimitReader`).

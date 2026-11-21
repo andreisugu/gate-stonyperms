@@ -58,7 +58,8 @@ func buildCommandTree(alias string, p *proxy.Proxy, mgr *manager.Manager) brigod
 			return hasPerm(ctx.Source, "stonyperms.use", "stonyperms.info", "stonyperms.sync", "stonyperms.check",
 				"stonyperms.verbose", "stonyperms.user", "stonyperms.group", "stonyperms.track", "stonyperms.log",
 				"stonyperms.listgroups", "stonyperms.creategroup", "stonyperms.deletegroup",
-				"stonyperms.listtracks", "stonyperms.createtrack", "stonyperms.deletetrack")
+				"stonyperms.listtracks", "stonyperms.createtrack", "stonyperms.deletetrack",
+				"stonyperms.editor", "stonyperms.applyedits", "stonyperms.tree")
 		})).
 		Executes(command.Command(func(cmdCtx *command.Context) error {
 			return HandleRoot(mgr, cmdCtx.Source)
@@ -159,6 +160,12 @@ func Dispatch(mgr *manager.Manager, src command.Source, args []string) error {
 			return nil
 		}
 		return HandleLogDispatch(mgr, src, rest)
+	case "editor", "ed":
+		return HandleEditor(mgr, src, rest)
+	case "applyedits", "applyedit":
+		return HandleApplyEdits(mgr, src, rest)
+	case "tree":
+		return HandleTree(mgr, src, rest)
 	default:
 		return src.SendMessage(Msg(Prefix+"&cUnknown subcommand '&e%s&c'. Type &b/sp&c for help.&r", root))
 	}
@@ -264,6 +271,9 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			"stonyperms.info",
 			"stonyperms.sync",
 			"stonyperms.check",
+			"stonyperms.editor",
+			"stonyperms.applyedits",
+			"stonyperms.tree",
 			"stonyperms.verbose",
 			"stonyperms.user",
 			"stonyperms.group",
@@ -327,7 +337,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 		switch argCount {
 		case 1:
 			candidates = []string{
-				"help", "info", "sync", "check", "verbose",
+				"help", "info", "sync", "check", "verbose", "editor", "applyedits", "tree",
 				"creategroup", "deletegroup", "listgroups", "createtrack", "deletetrack", "listtracks",
 				"user", "group", "track", "log",
 			}
@@ -358,7 +368,9 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 					candidates = append(candidates, t.Name)
 				}
 			case "verbose", "v":
-				candidates = []string{"on", "off", "record"}
+				candidates = []string{"on", "off", "record", "paste", "upload"}
+			case "tree":
+				candidates = []string{".", "gate", "stonyperms", "bettertab", "simplewhitelist", "smartlimbo", "skinschanger", "discord4gate"}
 			case "log", "logs":
 				candidates = []string{"recent", "search", "userhistory", "grouphistory", "trackhistory"}
 			}
@@ -367,9 +379,9 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			root := strings.ToLower(args[0])
 			switch root {
 			case "user", "u":
-				candidates = []string{"info", "permission", "parent", "meta", "promote", "demote", "showtracks", "clone", "clear"}
+				candidates = []string{"info", "permission", "parent", "meta", "promote", "demote", "showtracks", "editor", "clone", "clear"}
 			case "group", "g":
-				candidates = []string{"info", "setweight", "setdisplayname", "permission", "parent", "meta", "rename", "clone", "listmembers", "showtracks", "clear"}
+				candidates = []string{"info", "setweight", "setdisplayname", "permission", "parent", "meta", "rename", "clone", "listmembers", "showtracks", "editor", "clear"}
 			case "track", "t":
 				candidates = []string{"info", "append", "insert", "remove", "rename", "clear"}
 			case "check":

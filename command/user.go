@@ -56,6 +56,8 @@ func HandleUserDispatch(mgr *manager.Manager, src command.Source, args []string)
 		return handleUserDemote(mgr, src, user, rest)
 	case "showtracks":
 		return handleUserShowTracks(mgr, src, user)
+	case "editor", "ed":
+		return openUserEditor(mgr, src, user)
 	case "clear":
 		user.ClearAll()
 		_ = mgr.SaveUser(user)
@@ -77,7 +79,7 @@ func HandleUserDispatch(mgr *manager.Manager, src command.Source, args []string)
 		mgr.LogAction(getActorName(src), "user", targetUser.Username, fmt.Sprintf("Cloned data from %s", user.Username))
 		return src.SendMessage(Msg(Prefix+"&aSuccessfully cloned data from &e%s&a to &e%s&a!&r", user.Username, targetUser.Username))
 	default:
-		return src.SendMessage(Msg(Prefix+"&cUnknown user subcommand '&e%s&c'. Available: info, permission, parent, meta, promote, demote, clear, clone.&r", subCmd))
+		return src.SendMessage(Msg(Prefix+"&cUnknown user subcommand '&e%s&c'. Available: info, permission, parent, meta, promote, demote, editor, clear, clone.&r", subCmd))
 	}
 }
 

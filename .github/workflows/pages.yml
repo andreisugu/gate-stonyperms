@@ -1,0 +1,42 @@
+name: Deploy StonyPermsWeb to Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Stage static StonyPermsWeb site
+        run: |
+          mkdir -p _site
+          cp -r web/. _site/
+          rm -f _site/embed.go
+          touch _site/.nojekyll
+          for route in editor verbose tree wiki 404; do
+            cp web/index.html "_site/${route}.html"
+          done
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

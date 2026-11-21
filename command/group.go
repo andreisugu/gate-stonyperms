@@ -35,6 +35,8 @@ func HandleGroupDispatch(mgr *manager.Manager, src command.Source, args []string
 	rest := subArgs[1:]
 
 	switch subCmd {
+	case "editor", "ed":
+		return openGroupEditor(mgr, src, group)
 	case "permission", "perm", "p":
 		return handleGroupPermission(mgr, src, group, rest)
 	case "parent", "parents":
