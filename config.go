@@ -103,6 +103,7 @@ type Config struct {
 	APIWriteRateLimitBurst  int     `toml:"api_write_rate_limit_burst"`
 	APISSEEnabled           bool    `toml:"api_sse_enabled"`
 	APISSEMaxClients        int     `toml:"api_sse_max_clients"`
+	APIEditorPublicURL      string  `toml:"api_editor_public_url"`
 }
 
 func defaultConfig() *Config {

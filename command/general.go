@@ -44,7 +44,10 @@ func HandleHelp(mgr *manager.Manager, src command.Source, args []string) error {
 			ClickableRunCmd("&b/sp info&r", "/sp info", "Display system diagnostic statistics & storage health"),
 			ClickableRunCmd("&b/sp sync&r", "/sp sync", "Hot-reload all permissions data from disk"),
 			ClickableCmd("&b/sp check <user> <perm> [context...]&r", "/sp check ", "Evaluate permission with trace"),
-			ClickableCmd("&b/sp verbose <on|off|record> [filter]&r", "/sp verbose ", "Stream live permission checks to chat"),
+			ClickableRunCmd("&b/sp editor [filter]&r", "/sp editor", "Open the interactive StonyPermsWeb editor"),
+			ClickableCmd("&b/sp applyedits <code>&r", "/sp applyedits ", "Apply saved edits from the web editor"),
+			ClickableRunCmd("&b/sp tree [root]&r", "/sp tree", "Open the interactive Permission Tree viewer"),
+			ClickableCmd("&b/sp verbose <on|off|record|paste> [filter]&r", "/sp verbose ", "Stream or record permission checks for web viewer"),
 			ClickableCmd("&b/sp creategroup <group> [weight] [displayName]&r", "/sp creategroup ", "Create a new permission group"),
 			ClickableCmd("&b/sp deletegroup <group>&r", "/sp deletegroup ", "Delete an existing group"),
 			ClickableRunCmd("&b/sp listgroups&r", "/sp listgroups", "List all configured groups ordered by weight"),
@@ -256,27 +259,27 @@ func HandleVerbose(mgr *manager.Manager, src command.Source, args []string) erro
 		status := "&cOFF&r"
 		if mgr.Engine().IsVerboseActive() {
 			status = "&aON&r"
+		} else if mgr.Engine().IsVerboseRecording() {
+			status = "&aRECORDING&r"
 		}
-		return src.SendMessage(Msg(Prefix+"&bVerbose mode is currently %s&b. Use &e/sp verbose <on|off> [filter]&b.&r", status))
+		return src.SendMessage(Msg(Prefix+"&bVerbose mode is currently %s&b. Use &e/sp verbose <on|off|record|paste> [filter]&b.&r", status))
+	}
+
+	parseVerboseFilter := func(rest []string) engine.VerboseFilter {
+		var filter engine.VerboseFilter
+		if len(rest) == 1 {
+			filter.Query = rest[0]
+		} else if len(rest) > 1 {
+			filter.Target = rest[0]
+			filter.Query = rest[1]
+		}
+		return filter
 	}
 
 	action := strings.ToLower(args[0])
 	switch action {
-	case "on", "enable", "record":
-		filterTarget := ""
-		filterQuery := ""
-		if len(args) > 1 {
-			filterQuery = args[1]
-		}
-		if len(args) > 2 {
-			filterTarget = args[1]
-			filterQuery = args[2]
-		}
-
-		mgr.Engine().SetVerbose(true, engine.VerboseFilter{
-			Target: filterTarget,
-			Query:  filterQuery,
-		}, func(subject string, permission string, result model.Tristate, source string) {
+	case "on", "enable":
+		mgr.Engine().SetVerbose(true, parseVerboseFilter(args[1:]), func(subject string, permission string, result model.Tristate, source string) {
 			resColor := "&cFAIL"
 			if result == model.True {
 				resColor = "&aPASS"
@@ -287,12 +290,28 @@ func HandleVerbose(mgr *manager.Manager, src command.Source, args []string) erro
 
 		return src.SendMessage(Msg(Prefix + "&aVerbose logging enabled! Permission checks will now stream to your chat.&r"))
 
+	case "record":
+		mgr.Engine().StartVerboseRecording(getActorName(src), parseVerboseFilter(args[1:]))
+		return src.SendMessage(Msg(Prefix + "&aVerbose recording started! Run &e/sp verbose paste&a to upload to the web viewer.&r"))
+
+	case "paste", "upload":
+		rec := mgr.Engine().StopVerboseRecording()
+		created, err := mgr.CreateVerboseSession(rec, getActorName(src), "sp")
+		if err != nil {
+			return src.SendMessage(Msg(Prefix+"&cFailed to upload verbose log: %v&r", err))
+		}
+		if err := src.SendMessage(MsgPlain(Prefix + fmt.Sprintf("&aUploaded &e%d&a recorded permission checks:&r", created.Count))); err != nil {
+			return err
+		}
+		return src.SendMessage(ClickableURL("&a&n"+created.URL+"&r", created.URL, "Open the recorded checks in Verbose Viewer"))
+
 	case "off", "disable":
 		mgr.Engine().SetVerbose(false, engine.VerboseFilter{}, nil)
-		return src.SendMessage(Msg(Prefix + "&cVerbose logging disabled.&r"))
+		mgr.Engine().StopVerboseRecording()
+		return src.SendMessage(Msg(Prefix + "&cVerbose logging and recording disabled.&r"))
 
 	default:
-		return src.SendMessage(Msg(Prefix + "&cUsage: /sp verbose <on|off> [filter]&r"))
+		return src.SendMessage(Msg(Prefix + "&cUsage: /sp verbose <on|off|record|paste> [filter]&r"))
 	}
 }
 

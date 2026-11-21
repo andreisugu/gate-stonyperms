@@ -306,6 +306,7 @@ func (s *Server) Close(ctx context.Context) error {
 
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
+	s.registerWebRoutes(mux)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
 	// Read-tier routes

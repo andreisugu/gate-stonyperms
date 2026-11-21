@@ -90,6 +90,31 @@ func ClickableRunCmd(displayCmd, runCmd, description string) c.Component {
 	}
 }
 
+// ClickableURL creates a text component with a hover tooltip and click event to open a URL.
+func ClickableURL(displayText, targetURL, hoverHint string) c.Component {
+	comp := MsgPlain(displayText)
+	hover := MsgPlain(fmt.Sprintf("&eClick to open:\n&b%s\n&7%s", targetURL, hoverHint))
+
+	applyStyle := func(target c.Component) {
+		if st := target.Style(); st != nil {
+			st.ClickEvent = c.OpenUrl(targetURL)
+			st.HoverEvent = c.ShowText(hover)
+		}
+	}
+
+	applyStyle(comp)
+	for _, child := range comp.Children() {
+		applyStyle(child)
+	}
+
+	return &c.Text{
+		Extra: []c.Component{
+			MsgPlain("  "),
+			comp,
+		},
+	}
+}
+
 // PageButton creates a styled clickable button to jump between help pages.
 func PageButton(label, command, hoverText string) c.Component {
 	btn := MsgPlain(label)
