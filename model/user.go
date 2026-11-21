@@ -179,13 +179,11 @@ func (u *User) ClearAll() {
 func (u *User) Clone(targetUUID uuid.UUID, targetUsername string) *User {
 	cloned := NewUser(targetUUID, targetUsername)
 	cloned.PrimaryGroup = u.PrimaryGroup
-	cloned.Parents = append(cloned.Parents, u.Parents...)
-	cloned.Nodes = append(cloned.Nodes, u.Nodes...)
-	for k, v := range u.Meta {
-		cloned.Meta[k] = v
-	}
+	cloned.Parents = cloneInheritances(u.Parents)
+	cloned.Nodes = cloneNodes(u.Nodes)
+	cloned.Meta = cloneStringMap(u.Meta)
 	cloned.MetaEntries = cloneMetaEntries(u.MetaEntries)
-	cloned.Prefixes = append(cloned.Prefixes, u.Prefixes...)
-	cloned.Suffixes = append(cloned.Suffixes, u.Suffixes...)
+	cloned.Prefixes = clonePriorityMetas(u.Prefixes)
+	cloned.Suffixes = clonePriorityMetas(u.Suffixes)
 	return cloned
 }

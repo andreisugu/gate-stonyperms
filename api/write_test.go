@@ -967,3 +967,81 @@ func TestAPISearchBulkUpdateModifiersMetaTracksAndAffixes(t *testing.T) {
 		t.Fatalf("DELETE user track: %d %s", tc.Code, tc.Body.String())
 	}
 }
+
+func TestClearMetaEntriesAndBatchParity(t *testing.T) {
+	srv, mgr := newWriteTestServer(t)
+	h := srv.Handler()
+	marshal := func(v any) []byte {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json marshal: %v", err)
+		}
+		return b
+	}
+
+	_, _ = mgr.CreateGroup("vip", 20, "")
+	uid := uuid.New()
+	_ = doWriteRequest(t, h, http.MethodPost, "/v1/users", testWriteToken, "ops", "", marshal(map[string]any{
+		"uuid": uid.String(), "username": "BatchClearUser", "createOffline": true,
+	}))
+
+	// Batch primary_group_set auto-inherits vip + contextual temp meta_set
+	res := doWriteRequest(t, h, http.MethodPost, "/v1/users/"+uid.String()+"/batch", testWriteToken, "ops", "", marshal(map[string]any{
+		"operations": []map[string]any{
+			{"op": "primary_group_set", "group": "vip"},
+			{
+				"op": "meta_set", "key": "homes", "value": "5",
+				"durationSeconds": 3600, "contexts": map[string]string{"server": "survival"},
+			},
+		},
+	}))
+	if res.Code != http.StatusOK {
+		t.Fatalf("batch parity: %d %s", res.Code, res.Body.String())
+	}
+	u := mgr.GetUser(uid)
+	if u.PrimaryGroup != "vip" || len(u.Parents) == 0 || u.Parents[0].Group != "vip" {
+		t.Fatalf("expected primary_group_set batch op to auto-inherit vip, got pg=%q parents=%+v", u.PrimaryGroup, u.Parents)
+	}
+	if len(u.MetaEntries) != 1 || u.MetaEntries[0].Contexts["server"] != "survival" || u.MetaEntries[0].Expiry <= 0 {
+		t.Fatalf("expected contextual temp meta entry from batch, got %+v", u.MetaEntries)
+	}
+
+	// Also test contextual meta_unset via batch
+	unsetRes := doWriteRequest(t, h, http.MethodPost, "/v1/users/"+uid.String()+"/batch", testWriteToken, "ops", "", marshal(map[string]any{
+		"operations": []map[string]any{
+			{
+				"op": "meta_set", "key": "temp_only", "value": "x",
+				"contexts": map[string]string{"server": "lobby"},
+			},
+			{
+				"op": "meta_unset", "key": "temp_only",
+				"contexts": map[string]string{"server": "lobby"},
+			},
+		},
+	}))
+	if unsetRes.Code != http.StatusOK {
+		t.Fatalf("batch meta_unset: %d %s", unsetRes.Code, unsetRes.Body.String())
+	}
+
+	// Clear meta scope must wipe MetaEntries so snapshot reports no meta
+	clr := doWriteRequest(t, h, http.MethodPost, "/v1/users/"+uid.String()+"/clear", testWriteToken, "ops", "", marshal(map[string]any{
+		"scope": "meta",
+	}))
+	if clr.Code != http.StatusOK {
+		t.Fatalf("clear meta: %d %s", clr.Code, clr.Body.String())
+	}
+	if u2 := mgr.GetUser(uid); len(u2.Meta) != 0 || len(u2.MetaEntries) != 0 {
+		t.Fatalf("expected Meta and MetaEntries cleared, got meta=%v entries=%v", u2.Meta, u2.MetaEntries)
+	}
+	snap := doRequest(t, h, http.MethodGet, "/v1/players/"+uid.String()+"?server=survival", testToken, nil)
+	if snap.Code != http.StatusOK {
+		t.Fatalf("snapshot: %d %s", snap.Code, snap.Body.String())
+	}
+	var parsed snapshotResponse
+	if err := json.Unmarshal(snap.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("unmarshal snapshot: %v", err)
+	}
+	if len(parsed.User.Meta) != 0 {
+		t.Fatalf("expected cleared user meta in snapshot, got %v", parsed.User.Meta)
+	}
+}

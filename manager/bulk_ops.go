@@ -793,7 +793,8 @@ func (m *Manager) SetUserTrackGroup(id uuid.UUID, trackName, targetGroup string,
 		return nil, ErrGroupNotFound
 	}
 
-	updated, _, err := m.MutateUser(id, "", false, "default", actor, func(u *model.User) (bool, string, error) {
+	defGroup := m.DefaultGroup()
+	updated, _, err := m.MutateUser(id, "", false, defGroup, actor, func(u *model.User) (bool, string, error) {
 		trackSet := trackGroupSet(track)
 		kept := make([]model.Inheritance, 0, len(u.Parents)+1)
 		for _, p := range u.Parents {
@@ -806,7 +807,7 @@ func (m *Manager) SetUserTrackGroup(id uuid.UUID, trackName, targetGroup string,
 		inh := model.NewInheritance(targetGroup)
 		inh.Contexts = cloneContextsLocal(contexts)
 		u.AddParent(inh)
-		if len(contexts) == 0 && (u.PrimaryGroup == "" || u.PrimaryGroup == "default" || trackSet[strings.ToLower(u.PrimaryGroup)]) {
+		if len(contexts) == 0 && (u.PrimaryGroup == "" || u.PrimaryGroup == "default" || strings.EqualFold(u.PrimaryGroup, defGroup) || trackSet[strings.ToLower(u.PrimaryGroup)]) {
 			u.PrimaryGroup = targetGroup
 		}
 		return true, fmt.Sprintf("Set track '%s' group to '%s'", track.Name, targetGroup), nil
@@ -821,7 +822,8 @@ func (m *Manager) ClearUserTrack(id uuid.UUID, trackName string, contexts map[st
 		return nil, false, ErrTrackNotFound
 	}
 	removedAny := false
-	updated, _, err := m.MutateUser(id, "", false, "default", actor, func(u *model.User) (bool, string, error) {
+	defGroup := m.DefaultGroup()
+	updated, _, err := m.MutateUser(id, "", false, defGroup, actor, func(u *model.User) (bool, string, error) {
 		trackSet := trackGroupSet(track)
 		kept := make([]model.Inheritance, 0, len(u.Parents))
 		for _, p := range u.Parents {
@@ -833,7 +835,7 @@ func (m *Manager) ClearUserTrack(id uuid.UUID, trackName string, contexts map[st
 		}
 		u.Parents = kept
 		if len(contexts) == 0 && trackSet[strings.ToLower(u.PrimaryGroup)] {
-			u.PrimaryGroup = "default"
+			u.PrimaryGroup = defGroup
 			removedAny = true
 		}
 		if !removedAny {

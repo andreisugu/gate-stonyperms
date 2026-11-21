@@ -3,6 +3,7 @@ package stonyperms
 import (
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -103,7 +104,10 @@ var Plugin = proxy.Plugin{
 	Name: "StonyPerms",
 	Init: func(ctx context.Context, p *proxy.Proxy) error {
 		log := logr.FromContextOrDiscard(ctx)
-		configPath := filepath.Join("config", "stonyperms.toml")
+		configPath := strings.TrimSpace(os.Getenv("STONYPERMS_CONFIG"))
+		if configPath == "" {
+			configPath = filepath.Join("config", "stonyperms.toml")
+		}
 
 		cfg, err := LoadConfig(configPath)
 		if err != nil {
@@ -121,12 +125,8 @@ var Plugin = proxy.Plugin{
 			return err
 		}
 		globalManager.Store(mgr)
-		mgr.SetWebConfig(manager.WebConfig{
-			BaseURL:       ResolveWebBaseURL(cfg),
-			DefaultGroup:  cfg.DefaultGroup,
-			LiveSave:      cfg.APIEnabled,
-			PluginVersion: "0.3.0",
-		})
+		mgr.SetDefaultGroup(cfg.DefaultGroup)
+		mgr.SetAuditLogEnabled(cfg.EnableAuditLog)
 		mgr.Engine().SetStackConfig(engine.StackConfig{
 			PrefixEnabled:     cfg.PrefixStacking,
 			PrefixStartSpacer: cfg.PrefixStartSpacer,
@@ -143,6 +143,7 @@ var Plugin = proxy.Plugin{
 		// Start the optional HTTP API used by backend adapters and integrations.
 		// A configuration error disables the API (or write tier) without
 		// preventing Gate from starting with local permission enforcement intact.
+		apiStarted := false
 		if cfg.APIEnabled {
 			apiOpts, tokenErr := buildAPIOptions(cfg, log)
 			if tokenErr != nil {
@@ -153,9 +154,33 @@ var Plugin = proxy.Plugin{
 					log.Error(apiErr, "StonyPerms HTTP API not started")
 				} else if startErr := apiServer.Start(ctx); startErr != nil {
 					log.Error(startErr, "StonyPerms HTTP API not started")
+				} else {
+					apiStarted = true
 				}
 			}
 		}
+
+		webBaseURL := ResolveWebBaseURL(cfg)
+		if cfg.APIEnabled && !apiStarted && strings.TrimSpace(cfg.APIEditorPublicURL) == "" {
+			webBaseURL = manager.DefaultPublicWebURL
+		}
+		mgr.SetWebConfig(manager.WebConfig{
+			BaseURL:       webBaseURL,
+			DefaultGroup:  cfg.DefaultGroup,
+			LiveSave:      apiStarted,
+			PluginVersion: "0.3.0",
+		})
+
+		var serverNames []string
+		for _, srv := range p.Servers() {
+			if srv != nil && srv.ServerInfo() != nil {
+				if name := strings.TrimSpace(srv.ServerInfo().Name()); name != "" {
+					serverNames = append(serverNames, name)
+				}
+			}
+		}
+		mgr.SetWebRuntimeHints(serverNames, nil)
+		context.AfterFunc(ctx, mgr.Close)
 
 		var serverContexts sync.Map
 

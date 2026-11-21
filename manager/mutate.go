@@ -3,6 +3,7 @@ package manager
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +19,9 @@ var (
 	ErrGroupExists         = errors.New("group already exists")
 	ErrTrackExists         = errors.New("track already exists")
 	ErrCannotDeleteDefault = errors.New("cannot delete default group")
+	ErrCannotRenameDefault = errors.New("cannot rename the default group")
+
+	entityNamePattern = regexp.MustCompile(`^[a-z0-9_+-]{1,64}$`)
 )
 
 func userLogTarget(u *model.User) string {
@@ -327,6 +331,11 @@ func (m *Manager) DeleteGroupWithActor(name string, actor string) (uint64, error
 	}
 
 	m.mu.Lock()
+	if m.defaultGroup != "" && name == m.defaultGroup {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return rev, ErrCannotDeleteDefault
+	}
 	if _, exists := m.groups[name]; !exists {
 		rev := m.revision.Load()
 		m.mu.Unlock()
@@ -352,6 +361,180 @@ func (m *Manager) DeleteGroupWithActor(name string, actor string) (uint64, error
 		Timestamp: time.Now().UTC().Unix(),
 	})
 	return rev, nil
+}
+
+// RenameGroup atomically renames oldName to newName, cascading references across
+// other groups' parents, tracks' progressions, and users' primary group and parents.
+func (m *Manager) RenameGroup(oldName, newName, actor string) (*model.Group, uint64, error) {
+	oldName = strings.ToLower(strings.TrimSpace(oldName))
+	newName = strings.ToLower(strings.TrimSpace(newName))
+	if oldName == "" || !entityNamePattern.MatchString(newName) {
+		return nil, m.revision.Load(), errors.New("group name must match ^[a-z0-9_+-]{1,64}$")
+	}
+
+	m.mu.Lock()
+	defGroup := m.defaultGroup
+	if defGroup == "" {
+		defGroup = "default"
+	}
+	if oldName == "default" || oldName == defGroup {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, rev, ErrCannotRenameDefault
+	}
+	oldGroup, exists := m.groups[oldName]
+	if !exists || oldGroup == nil {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, rev, ErrGroupNotFound
+	}
+	if oldName == newName {
+		ret := copyGroup(oldGroup)
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return ret, rev, nil
+	}
+	if _, conflict := m.groups[newName]; conflict {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, rev, ErrGroupExists
+	}
+
+	renamed := oldGroup.Clone(newName)
+	rewriteInheritanceRefs(&renamed.Parents, oldName, newName)
+
+	updatedGroups := make(map[string]*model.Group)
+	for gName, g := range m.groups {
+		if g == nil || gName == oldName {
+			continue
+		}
+		if !hasInheritanceRef(g.Parents, oldName) {
+			continue
+		}
+		gCopy := copyGroup(g)
+		rewriteInheritanceRefs(&gCopy.Parents, oldName, newName)
+		updatedGroups[gName] = gCopy
+	}
+
+	updatedTracks := make(map[string]*model.Track)
+	for tName, t := range m.tracks {
+		if t == nil || !hasTrackGroupRef(t.Groups, oldName) {
+			continue
+		}
+		tCopy := copyTrack(t)
+		for i, tg := range tCopy.Groups {
+			if strings.EqualFold(tg, oldName) {
+				tCopy.Groups[i] = newName
+			}
+		}
+		updatedTracks[tName] = tCopy
+	}
+
+	updatedUsers := make(map[uuid.UUID]*model.User)
+	for uid, u := range m.users {
+		if u == nil {
+			continue
+		}
+		primaryMatch := strings.EqualFold(u.PrimaryGroup, oldName)
+		parentMatch := hasInheritanceRef(u.Parents, oldName)
+		if !primaryMatch && !parentMatch {
+			continue
+		}
+		uCopy := copyUser(u)
+		if primaryMatch {
+			uCopy.PrimaryGroup = newName
+		}
+		if parentMatch {
+			rewriteInheritanceRefs(&uCopy.Parents, oldName, newName)
+		}
+		updatedUsers[uid] = uCopy
+	}
+
+	if err := m.storage.SaveGroup(renamed); err != nil {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, rev, err
+	}
+	for _, gCopy := range updatedGroups {
+		if err := m.storage.SaveGroup(gCopy); err != nil {
+			rev := m.revision.Load()
+			m.mu.Unlock()
+			return nil, rev, err
+		}
+	}
+	for _, tCopy := range updatedTracks {
+		if err := m.storage.SaveTrack(tCopy); err != nil {
+			rev := m.revision.Load()
+			m.mu.Unlock()
+			return nil, rev, err
+		}
+	}
+	for _, uCopy := range updatedUsers {
+		if err := m.storage.SaveUser(uCopy); err != nil {
+			rev := m.revision.Load()
+			m.mu.Unlock()
+			return nil, rev, err
+		}
+	}
+	if err := m.storage.DeleteGroup(oldName); err != nil {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, rev, err
+	}
+
+	delete(m.groups, oldName)
+	m.groups[newName] = renamed
+	for gName, gCopy := range updatedGroups {
+		m.groups[gName] = gCopy
+	}
+	for tName, tCopy := range updatedTracks {
+		m.tracks[tName] = tCopy
+	}
+	for uid, uCopy := range updatedUsers {
+		m.users[uid] = uCopy
+	}
+
+	rev := m.bumpRevisionLocked()
+	if actor != "" {
+		m.logActionLocked(actor, "group", newName, fmt.Sprintf("Renamed group '%s' to '%s'", oldName, newName))
+	}
+	ret := copyGroup(renamed)
+	cascaded := len(updatedTracks) > 0 || len(updatedUsers) > 0
+	m.mu.Unlock()
+
+	ts := time.Now().UTC().Unix()
+	m.notifyEvent(ChangeEvent{Revision: rev, Type: EventGroupDeleted, Group: oldName, Actor: actor, Timestamp: ts})
+	m.notifyEvent(ChangeEvent{Revision: rev, Type: EventGroupUpdated, Group: newName, Actor: actor, Timestamp: ts})
+	if cascaded {
+		m.notifyEvent(ChangeEvent{Revision: rev, Type: EventReload, Actor: actor, Timestamp: ts})
+	}
+	return ret, rev, nil
+}
+
+func hasInheritanceRef(parents []model.Inheritance, target string) bool {
+	for _, p := range parents {
+		if strings.EqualFold(p.Group, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func rewriteInheritanceRefs(parents *[]model.Inheritance, oldName, newName string) {
+	for i := range *parents {
+		if strings.EqualFold((*parents)[i].Group, oldName) {
+			(*parents)[i].Group = newName
+		}
+	}
+}
+
+func hasTrackGroupRef(groups []string, target string) bool {
+	for _, g := range groups {
+		if strings.EqualFold(g, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // MutateTrack atomically copies, mutates, persists, and publishes a track.
@@ -512,4 +695,60 @@ func (m *Manager) DeleteTrackWithActor(name string, actor string) (uint64, error
 		Timestamp: time.Now().UTC().Unix(),
 	})
 	return rev, nil
+}
+
+// RenameTrack atomically renames an existing track after validating and persisting the new record.
+func (m *Manager) RenameTrack(oldName, newName, actor string) (*model.Track, uint64, error) {
+	oldName = strings.ToLower(strings.TrimSpace(oldName))
+	newName = strings.ToLower(strings.TrimSpace(newName))
+	if oldName == "" || !entityNamePattern.MatchString(newName) {
+		return nil, m.revision.Load(), errors.New("track name must match ^[a-z0-9_+-]{1,64}$")
+	}
+
+	m.mu.Lock()
+	existing, exists := m.tracks[oldName]
+	if !exists || existing == nil {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, rev, ErrTrackNotFound
+	}
+	if oldName == newName {
+		ret := copyTrack(existing)
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return ret, rev, nil
+	}
+	if _, conflict := m.tracks[newName]; conflict {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, rev, ErrTrackExists
+	}
+
+	renamed := copyTrack(existing)
+	renamed.Name = newName
+	if err := m.storage.SaveTrack(renamed); err != nil {
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, rev, err
+	}
+	if err := m.storage.DeleteTrack(oldName); err != nil {
+		_ = m.storage.DeleteTrack(newName)
+		rev := m.revision.Load()
+		m.mu.Unlock()
+		return nil, rev, err
+	}
+
+	delete(m.tracks, oldName)
+	m.tracks[newName] = renamed
+	rev := m.bumpRevisionLocked()
+	if actor != "" {
+		m.logActionLocked(actor, "track", newName, fmt.Sprintf("Renamed track '%s' to '%s'", oldName, newName))
+	}
+	ret := copyTrack(renamed)
+	m.mu.Unlock()
+
+	ts := time.Now().UTC().Unix()
+	m.notifyEvent(ChangeEvent{Revision: rev, Type: EventTrackDeleted, Track: oldName, Actor: actor, Timestamp: ts})
+	m.notifyEvent(ChangeEvent{Revision: rev, Type: EventTrackUpdated, Track: newName, Actor: actor, Timestamp: ts})
+	return ret, rev, nil
 }

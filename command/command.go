@@ -1,6 +1,7 @@
 package command
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 	"go.minekube.com/gate/pkg/edition/java/proxy"
 
 	"github.com/andreisugu/gate-stonyperms/manager"
+	"github.com/andreisugu/gate-stonyperms/model"
 )
 
 // SuggestionFunc adapts a function into a brigodier.SuggestionProvider.
@@ -283,6 +285,43 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 		}
 
 		// Helper to fetch common permission nodes
+		collectKnownUsers := func(exclude string) []string {
+			var list []string
+			if p != nil {
+				for _, pl := range p.Players() {
+					if exclude == "" || !strings.EqualFold(pl.Username(), exclude) {
+						list = append(list, pl.Username())
+					}
+				}
+			}
+			users, _, _ := mgr.ListUsers("", 0, 200)
+			for _, u := range users {
+				if u != nil && u.Username != "" && (exclude == "" || !strings.EqualFold(u.Username, exclude)) {
+					list = append(list, u.Username)
+				}
+			}
+			return list
+		}
+
+		collectMetaKeys := func(meta map[string]string, entries []model.MetaEntry) []string {
+			seen := make(map[string]struct{}, len(meta)+len(entries))
+			out := make([]string, 0, len(meta)+len(entries))
+			for k := range meta {
+				if _, ok := seen[k]; !ok {
+					seen[k] = struct{}{}
+					out = append(out, k)
+				}
+			}
+			for _, me := range entries {
+				if _, ok := seen[me.Key]; !ok {
+					seen[me.Key] = struct{}{}
+					out = append(out, me.Key)
+				}
+			}
+			sort.Strings(out)
+			return out
+		}
+
 		commonPermNodes := []string{
 			"gate.command.server",
 			"gate.command.send",
@@ -296,6 +335,10 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			"stonyperms.info",
 			"stonyperms.sync",
 			"stonyperms.check",
+			"stonyperms.search",
+			"stonyperms.bulkupdate",
+			"stonyperms.export",
+			"stonyperms.import",
 			"stonyperms.editor",
 			"stonyperms.applyedits",
 			"stonyperms.tree",
@@ -323,6 +366,8 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			"bettertab.reload",
 			"bettertab.name",
 			"bettertab.name.color",
+			"bettertab.nick",
+			"bettertab.whois",
 			"bettertab.toggle",
 			"bettertab.info",
 			"bettertab.reset",
@@ -373,17 +418,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			case "help", "?":
 				candidates = []string{"1", "2", "3", "4"}
 			case "user", "u", "check":
-				if p != nil {
-					for _, pl := range p.Players() {
-						candidates = append(candidates, pl.Username())
-					}
-				}
-				for _, u := range mgr.GetGroupMembers("default") {
-					candidates = append(candidates, u.Username)
-				}
-				for _, u := range mgr.GetGroupMembers("admin") {
-					candidates = append(candidates, u.Username)
-				}
+				candidates = collectKnownUsers("")
 			case "group", "g", "deletegroup":
 				for _, g := range mgr.GetGroups() {
 					candidates = append(candidates, g.Name)
@@ -436,14 +471,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 				case "recent":
 					candidates = []string{"1", "2", "3", "4", "5"}
 				case "userhistory", "user":
-					if p != nil {
-						for _, pl := range p.Players() {
-							candidates = append(candidates, pl.Username())
-						}
-					}
-					for _, u := range mgr.GetGroupMembers("default") {
-						candidates = append(candidates, u.Username)
-					}
+					candidates = collectKnownUsers("")
 				case "grouphistory", "group":
 					for _, g := range mgr.GetGroups() {
 						candidates = append(candidates, g.Name)
@@ -473,13 +501,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 						candidates = append(candidates, t.Name)
 					}
 				case "clone":
-					if p != nil {
-						for _, pl := range p.Players() {
-							if !strings.EqualFold(pl.Username(), target) {
-								candidates = append(candidates, pl.Username())
-							}
-						}
-					}
+					candidates = collectKnownUsers(target)
 				}
 			} else if root == "group" || root == "g" {
 				switch sub {
@@ -566,9 +588,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 						candidates = []string{"prefix", "suffix", "primary-group", "rank-color", "custom-tag"}
 					case "unset", "unsettemp":
 						if u != nil {
-							for k := range u.Meta {
-								candidates = append(candidates, k)
-							}
+							candidates = collectMetaKeys(u.Meta, u.MetaEntries)
 						}
 					case "setprefix", "setsuffix", "addprefix", "addsuffix", "addtempprefix", "settempprefix", "addtempsuffix", "settempsuffix":
 						candidates = priorities
@@ -627,9 +647,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 						candidates = []string{"prefix", "suffix", "display-name", "color"}
 					case "unset", "unsettemp":
 						if grp != nil {
-							for k := range grp.Meta {
-								candidates = append(candidates, k)
-							}
+							candidates = collectMetaKeys(grp.Meta, grp.MetaEntries)
 						}
 					case "setprefix", "setsuffix", "addprefix", "addsuffix", "addtempprefix", "settempprefix", "addtempsuffix", "settempsuffix":
 						candidates = priorities
