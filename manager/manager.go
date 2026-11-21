@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
@@ -172,6 +173,9 @@ func (m *Manager) Close() {
 		close(m.stopChan)
 	}
 	m.closeSubscribers()
+	if closer, ok := m.storage.(io.Closer); ok {
+		_ = closer.Close()
+	}
 }
 
 // Engine returns the underlying calculation engine.
