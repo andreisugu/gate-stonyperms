@@ -2,7 +2,9 @@ package stonyperms
 
 import (
 	"context"
+	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -66,6 +68,35 @@ func buildAPIOptions(cfg *Config, log logr.Logger) (api.Options, error) {
 	}, nil
 }
 
+// ResolveWebBaseURL returns the base URL used by /sp editor, /sp verbose paste, and /sp tree.
+func ResolveWebBaseURL(cfg *Config) string {
+	if cfg == nil {
+		return manager.DefaultPublicWebURL
+	}
+	if trimmed := strings.TrimSpace(cfg.APIEditorPublicURL); trimmed != "" {
+		return strings.TrimRight(trimmed, "/")
+	}
+	if !cfg.APIEnabled {
+		return manager.DefaultPublicWebURL
+	}
+	listen := strings.TrimSpace(cfg.APIListen)
+	if listen == "" {
+		listen = "127.0.0.1:8737"
+	}
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return manager.DefaultPublicWebURL
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	scheme := "http"
+	if strings.TrimSpace(cfg.APITLSCert) != "" && strings.TrimSpace(cfg.APITLSKey) != "" {
+		scheme = "https"
+	}
+	return scheme + "://" + net.JoinHostPort(host, port)
+}
+
 // Plugin is the primary Gate proxy plugin entrypoint for StonyPerms.
 var Plugin = proxy.Plugin{
 	Name: "StonyPerms",
@@ -89,6 +120,12 @@ var Plugin = proxy.Plugin{
 			return err
 		}
 		globalManager.Store(mgr)
+		mgr.SetWebConfig(manager.WebConfig{
+			BaseURL:       ResolveWebBaseURL(cfg),
+			DefaultGroup:  cfg.DefaultGroup,
+			LiveSave:      cfg.APIEnabled,
+			PluginVersion: "0.3.0",
+		})
 
 		// Start the optional HTTP API used by backend adapters and integrations.
 		// A configuration error disables the API (or write tier) without

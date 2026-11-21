@@ -25,12 +25,43 @@ type VerboseFilter struct {
 // VerboseLogger callback func to receive verbose check events.
 type VerboseLogger func(subject string, permission string, result model.Tristate, source string)
 
+const maxVerboseEntries = 2000
+
+// VerboseEntry captures a single evaluated permission check during verbose recording.
+type VerboseEntry struct {
+	Subject    string `json:"subject"`
+	Permission string `json:"permission"`
+	Result     string `json:"result"`
+	Source     string `json:"source,omitempty"`
+	Timestamp  int64  `json:"timestamp"`
+}
+
+// VerboseRecording captures a session of recorded permission checks.
+type VerboseRecording struct {
+	Active     bool           `json:"active"`
+	Actor      string         `json:"actor"`
+	Filter     VerboseFilter  `json:"filter"`
+	StartTime  int64          `json:"startTime"`
+	EndTime    int64          `json:"endTime"`
+	TotalCount int            `json:"totalCount"`
+	Truncated  bool           `json:"truncated"`
+	Entries    []VerboseEntry `json:"entries"`
+}
+
 // Engine performs high-performance permission, metadata, and inheritance calculations.
 type Engine struct {
 	mu            sync.RWMutex
 	verboseActive bool
 	verboseFilter VerboseFilter
 	verboseLog    VerboseLogger
+	recordActive  bool
+	recordActor   string
+	recordFilter  VerboseFilter
+	recordStart   int64
+	recordEnd     int64
+	recordTotal   int
+	recordTrunc   bool
+	recordEntries []VerboseEntry
 }
 
 // New creates a new permission calculation engine.
@@ -54,17 +85,113 @@ func (e *Engine) IsVerboseActive() bool {
 	return e.verboseActive
 }
 
+// StartVerboseRecording begins capturing evaluated permission checks for web playback.
+func (e *Engine) StartVerboseRecording(actor string, filter VerboseFilter) {
+	nowMs := time.Now().UTC().UnixMilli()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.recordActive = true
+	e.recordActor = actor
+	e.recordFilter = filter
+	e.recordStart = nowMs
+	e.recordEnd = nowMs
+	e.recordTotal = 0
+	e.recordTrunc = false
+	e.recordEntries = nil
+}
+
+// StopVerboseRecording stops active recording while preserving captured entries for upload.
+func (e *Engine) StopVerboseRecording() VerboseRecording {
+	nowMs := time.Now().UTC().UnixMilli()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.recordActive {
+		e.recordActive = false
+		if nowMs > e.recordEnd {
+			e.recordEnd = nowMs
+		}
+	}
+	return e.snapshotRecordingLocked()
+}
+
+// SnapshotVerboseRecording returns a copy of the current or most recent verbose recording.
+func (e *Engine) SnapshotVerboseRecording() VerboseRecording {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.snapshotRecordingLocked()
+}
+
+// IsVerboseRecording reports whether background verbose check recording is active.
+func (e *Engine) IsVerboseRecording() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.recordActive
+}
+
+func (e *Engine) snapshotRecordingLocked() VerboseRecording {
+	entries := make([]VerboseEntry, len(e.recordEntries))
+	copy(entries, e.recordEntries)
+	return VerboseRecording{
+		Active:     e.recordActive,
+		Actor:      e.recordActor,
+		Filter:     e.recordFilter,
+		StartTime:  e.recordStart,
+		EndTime:    e.recordEnd,
+		TotalCount: e.recordTotal,
+		Truncated:  e.recordTrunc,
+		Entries:    entries,
+	}
+}
+
+func matchesFilter(f VerboseFilter, subject, perm string) bool {
+	if f.Target != "" && !strings.EqualFold(f.Target, subject) {
+		return false
+	}
+	if f.Query != "" {
+		node := model.Node{Key: f.Query}
+		if !node.MatchesPermission(perm) && !strings.Contains(strings.ToLower(perm), strings.ToLower(f.Query)) {
+			return false
+		}
+	}
+	return true
+}
+
 // PermissionValue evaluates the permission for a user with given groups and context.
 func (e *Engine) PermissionValue(user *model.User, groups map[string]*model.Group, targetPerm string, contexts map[string]string) model.Tristate {
 	res := e.Evaluate(user, groups, targetPerm, contexts)
 
 	e.mu.RLock()
-	if e.verboseActive && e.verboseLog != nil {
-		if e.matchesVerboseFilter(user.Username, targetPerm) {
-			e.verboseLog(user.Username, targetPerm, res.Result, res.Source)
-		}
-	}
+	needChat := e.verboseActive && e.verboseLog != nil && matchesFilter(e.verboseFilter, user.Username, targetPerm)
+	chatLogger := e.verboseLog
+	needRecord := e.recordActive && matchesFilter(e.recordFilter, user.Username, targetPerm)
 	e.mu.RUnlock()
+
+	if needChat {
+		chatLogger(user.Username, targetPerm, res.Result, res.Source)
+	}
+	if needRecord {
+		nowMs := time.Now().UTC().UnixMilli()
+		entry := VerboseEntry{
+			Subject:    user.Username,
+			Permission: targetPerm,
+			Result:     strings.ToLower(res.Result.String()),
+			Source:     res.Source,
+			Timestamp:  nowMs,
+		}
+		e.mu.Lock()
+		if e.recordActive && matchesFilter(e.recordFilter, user.Username, targetPerm) {
+			e.recordTotal++
+			if nowMs > e.recordEnd {
+				e.recordEnd = nowMs
+			}
+			if len(e.recordEntries) < maxVerboseEntries {
+				e.recordEntries = append(e.recordEntries, entry)
+			} else {
+				e.recordTrunc = true
+			}
+		}
+		e.mu.Unlock()
+	}
 
 	return res.Result
 }
@@ -395,17 +522,4 @@ func (e *Engine) GetMeta(user *model.User, groups map[string]*model.Group, key s
 		}
 	}
 	return "", false
-}
-
-func (e *Engine) matchesVerboseFilter(subject, perm string) bool {
-	if e.verboseFilter.Target != "" && !strings.EqualFold(e.verboseFilter.Target, subject) {
-		return false
-	}
-	if e.verboseFilter.Query != "" {
-		node := model.Node{Key: e.verboseFilter.Query}
-		if !node.MatchesPermission(perm) && !strings.Contains(strings.ToLower(perm), strings.ToLower(e.verboseFilter.Query)) {
-			return false
-		}
-	}
-	return true
 }

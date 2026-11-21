@@ -1,0 +1,208 @@
+package manager
+
+import (
+	"bytes"
+	"compress/gzip"
+	"encoding/base64"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/andreisugu/gate-stonyperms/engine"
+	"github.com/andreisugu/gate-stonyperms/model"
+	"github.com/andreisugu/gate-stonyperms/storage"
+)
+
+func newWebTestManager(t *testing.T) *Manager {
+	t.Helper()
+	store, err := storage.NewJSONStorage(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewJSONStorage: %v", err)
+	}
+	mgr, err := New(store)
+	if err != nil {
+		t.Fatalf("manager.New: %v", err)
+	}
+	t.Cleanup(mgr.Close)
+	return mgr
+}
+
+func TestEditorSessionLifecycleAndSave(t *testing.T) {
+	mgr := newWebTestManager(t)
+	mgr.SetWebConfig(WebConfig{
+		BaseURL:      "http://127.0.0.1:8737",
+		DefaultGroup: "default",
+		LiveSave:     true,
+	})
+
+	vip, _, err := mgr.CreateGroupWithActor("vip", 30, "&3[VIP]", "Console")
+	if err != nil {
+		t.Fatalf("CreateGroupWithActor: %v", err)
+	}
+	vip.AddNode(model.NewNode("essentials.fly", true))
+	if err := mgr.SaveGroup(vip); err != nil {
+		t.Fatalf("SaveGroup: %v", err)
+	}
+
+	u := mgr.GetOrCreateUser(uuid.New(), "Larryy_")
+	u.AddParent(model.NewInheritance("vip"))
+	if err := mgr.SaveUser(u); err != nil {
+		t.Fatalf("SaveUser: %v", err)
+	}
+
+	created, err := mgr.CreateEditorSession(WebSessionCreateOptions{
+		Actor:            "Admin",
+		TargetType:       "group",
+		Target:           "vip",
+		ExtraPermissions: []string{"custom.plugin.use"},
+	})
+	if err != nil {
+		t.Fatalf("CreateEditorSession: %v", err)
+	}
+	if !strings.Contains(created.URL, "/editor?session="+created.Token) {
+		t.Fatalf("unexpected session URL: %s", created.URL)
+	}
+
+	loaded, ok := mgr.GetEditorSession(created.Token)
+	if !ok {
+		t.Fatal("expected created editor session to exist")
+	}
+	if len(loaded.Groups) < 2 || len(loaded.Users) < 1 {
+		t.Fatalf("expected groups and users in snapshot, got %d groups %d users", len(loaded.Groups), len(loaded.Users))
+	}
+
+	newMod := *model.NewGroup("mod", 80)
+	newMod.DisplayName = "&9[Mod]"
+	newMod.AddNode(model.NewNode("gate.command.send", true))
+	newMod.AddParent(model.NewInheritance("vip"))
+
+	staffTrack := model.Track{Name: "staff", Groups: []string{"vip", "mod"}}
+
+	summary, applyCode, err := mgr.SaveEditorSession(created.Token, EditorSavePayload{
+		Groups: append(loaded.Groups, newMod),
+		Tracks: []model.Track{staffTrack},
+		Users:  loaded.Users,
+	})
+	if err != nil {
+		t.Fatalf("SaveEditorSession: %v", err)
+	}
+	if summary.GroupsUpdated != 1 || summary.TracksUpdated != 1 {
+		t.Fatalf("unexpected save summary: %+v", summary)
+	}
+	if !strings.HasPrefix(applyCode, ShortApplyPrefix) {
+		t.Fatalf("expected short apply code, got %q", applyCode)
+	}
+	if got := mgr.GetGroup("mod"); got == nil || !got.Nodes[0].Value {
+		t.Fatalf("expected mod group persisted, got %+v", got)
+	}
+	if tr := mgr.GetTrack("staff"); tr == nil || len(tr.Groups) != 2 {
+		t.Fatalf("expected staff track persisted, got %+v", tr)
+	}
+
+	if _, _, err := mgr.SaveEditorSession(created.Token, EditorSavePayload{
+		DeletedGroups: []string{"mod", "default"},
+	}); !errors.Is(err, ErrCannotDeleteDefault) {
+		t.Fatalf("expected ErrCannotDeleteDefault, got %v", err)
+	}
+	if mgr.GetGroup("mod") == nil {
+		t.Fatal("mod should remain intact when validation fails")
+	}
+}
+
+func TestPortableApplyCodeAndZipBombProtection(t *testing.T) {
+	mgr := newWebTestManager(t)
+	g := model.NewGroup("builder", 45)
+	g.AddNode(model.NewNode("worldedit.wand", true))
+
+	code, err := EncodePortableApplyCode(EditorSavePayload{
+		Actor:  "WebUser",
+		Groups: []model.Group{*g},
+	})
+	if err != nil {
+		t.Fatalf("EncodePortableApplyCode: %v", err)
+	}
+	if !strings.HasPrefix(code, PortableCodePrefix) {
+		t.Fatalf("expected %s prefix, got %q", PortableCodePrefix, code)
+	}
+
+	summary, err := mgr.ApplyEditCode("Console", code)
+	if err != nil {
+		t.Fatalf("ApplyEditCode: %v", err)
+	}
+	if summary.GroupsUpdated != 1 || mgr.GetGroup("builder") == nil {
+		t.Fatalf("expected builder group applied, summary=%+v", summary)
+	}
+
+	shortCode, err := mgr.CreateShortApplyCode(EditorSavePayload{
+		DeletedGroups: []string{"builder"},
+	})
+	if err != nil {
+		t.Fatalf("CreateShortApplyCode: %v", err)
+	}
+	sumDel, err := mgr.ApplyEditCode("Console", shortCode)
+	if err != nil || sumDel.GroupsDeleted != 1 {
+		t.Fatalf("expected short code deletion, got %+v err=%v", sumDel, err)
+	}
+	if _, err := mgr.ApplyEditCode("Console", shortCode); !errors.Is(err, ErrInvalidApplyCode) {
+		t.Fatalf("expected ErrInvalidApplyCode on reuse, got %v", err)
+	}
+
+	var raw bytes.Buffer
+	gz := gzip.NewWriter(&raw)
+	over := bytes.Repeat([]byte("A"), maxPortableCodeBytes+512)
+	if _, err := gz.Write(over); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	bombCode := PortableCodePrefix + base64.RawURLEncoding.EncodeToString(raw.Bytes())
+	if _, err := DecodePortableApplyCode(bombCode); !errors.Is(err, ErrInvalidApplyCode) {
+		t.Fatalf("expected ErrInvalidApplyCode for oversized payload, got %v", err)
+	}
+}
+
+func TestOfflinePortableSessionURLAndTreeVerbose(t *testing.T) {
+	mgr := newWebTestManager(t)
+	mgr.SetWebConfig(WebConfig{
+		BaseURL:  DefaultPublicWebURL,
+		LiveSave: false,
+	})
+	created, err := mgr.CreateEditorSession(WebSessionCreateOptions{Actor: "Console"})
+	if err != nil {
+		t.Fatalf("CreateEditorSession offline: %v", err)
+	}
+	if !strings.Contains(created.URL, "/editor#data=sp1_") {
+		t.Fatalf("expected portable hash URL when LiveSave=false, got %s", created.URL)
+	}
+
+	mgr.SetWebConfig(WebConfig{
+		BaseURL:  "http://127.0.0.1:8737",
+		LiveSave: true,
+	})
+	rec := engine.VerboseRecording{
+		Actor:      "Console",
+		TotalCount: 1,
+		Entries: []engine.VerboseEntry{{
+			Subject: "Tester", Permission: "gate.command.ping", Result: "true", Source: "group:default",
+		}},
+	}
+	vb, err := mgr.CreateVerboseSession(rec, "Console", "sp")
+	if err != nil || vb.Count != 1 {
+		t.Fatalf("CreateVerboseSession: %+v err=%v", vb, err)
+	}
+	if _, ok := mgr.GetVerboseSession(vb.Token); !ok {
+		t.Fatal("expected verbose session to be stored")
+	}
+
+	tr, err := mgr.CreateTreeSession("gate", "Console", "sp", []string{"gate.custom.node"})
+	if err != nil || tr.Count == 0 {
+		t.Fatalf("CreateTreeSession: %+v err=%v", tr, err)
+	}
+	treeData, ok := mgr.GetTreeSession(tr.Token)
+	if !ok || treeData.Metadata.Root != "gate" {
+		t.Fatalf("unexpected tree session: ok=%v data=%+v", ok, treeData)
+	}
+}
