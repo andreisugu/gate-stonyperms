@@ -18,6 +18,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      - run: (cd spec && sha256sum -c SHA256SUMS)
       - run: go vet ./...
       - run: go test -race -count=1 ./...
 
