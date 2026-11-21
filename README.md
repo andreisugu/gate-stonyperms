@@ -2,10 +2,11 @@
 
 # 💎 Gate StonyPerms
 
-**Lightning-fast, contextual permissions engine & cross-server HTTP + SSE platform for Minekube Gate.**
+**Contextual permissions engine, multi-backend storage (`JSON`, `SQLite`, `MariaDB/MySQL`, `PostgreSQL`), StonyPermsWeb suite, and scoped HTTP + SSE platform for Minekube Gate.**
 
 <p>
   <a href="https://github.com/andreisugu/gate-stonyperms/actions/workflows/ci.yml"><img src="https://github.com/andreisugu/gate-stonyperms/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/andreisugu/gate-stonyperms/releases"><img src="https://img.shields.io/github/v/release/andreisugu/gate-stonyperms?style=flat-square&label=Release" alt="Latest Release" /></a>
   <a href="https://pkg.go.dev/github.com/andreisugu/gate-stonyperms"><img src="https://pkg.go.dev/badge/github.com/andreisugu/gate-stonyperms.svg" alt="Go Reference" /></a>
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.26" />
   <a href="https://andreisugu.github.io/gate-stonyperms/"><img src="https://img.shields.io/badge/StonyPermsWeb-Live_Demo-94df03?style=flat-square&logoColor=181a1f" alt="StonyPermsWeb" /></a>
@@ -16,10 +17,12 @@
 <p>
   <a href="#-key-features">Features</a> •
   <a href="#-installation">Installation</a> •
-  <a href="#-stonypermsweb-suite">Web Suite</a> •
+  <a href="#-storage-backends--migration">Storage Backends</a> •
+  <a href="#-stonypermsweb-suite">StonyPermsWeb</a> •
   <a href="#-http-api-v02--live-sse">HTTP API v0.2</a> •
   <a href="#-configuration">Configuration</a> •
   <a href="#-commands">Commands</a> •
+  <a href="#-go-plugin-api">Go API</a> •
   <a href="#-minekube-gate-extensions-suite">Gate Suite</a>
 </p>
 
@@ -30,12 +33,13 @@
 ## ✨ Key Features
 
 - **Full Admin CLI (`/sp`):** Complete `user`, `group`, `track`, `check`, `search`, `bulkupdate`, `export`/`import`, `networksync`, `verbose`, and `log` trees with Brigadier auto-completion.
-- **Exact + Wildcard + Explicit Deny Evaluation:** Supports exact nodes (`gate.command.server`), sub-wildcards (`gate.command.*`, `*`), explicit `false` denials, and circular inheritance protection.
-- **Dynamic Contexts & Temporary Modifiers:** Per-server/world contexts (`server=lobby`) and expiring permissions, parents, custom meta keys, prefixes, and suffixes with `accumulate`, `replace`, and `deny` collision modifiers.
-- **Weighted Inheritance, Tracks & Affix Stacking:** Groups resolve in descending weight order alongside promotion tracks (`settrack`/`cleartrack`), contextual metadata keys, and optional priority-ordered prefix/suffix stacking with custom spacers and deduplication.
-- **v0.2 Scoped HTTP API & Live SSE Stream:** Opt-in cross-server synchronization (`GET /v1/events` SSE invalidation, `ETag` snapshots, batch queries, idempotent audited writes, and multi-token rotation) for Paper, Fabric, web stores, and stats services.
-- **Built-In StonyPermsWeb Suite (`https://andreisugu.github.io/gate-stonyperms/`):** Embedded (`//go:embed`) & GitHub-Pages-hosted Web Permissions Editor (`/sp editor`), Verbose Viewer (`/sp verbose record` + `paste`), Permission Tree Viewer (`/sp tree`), built-in Wiki, and `Ctrl+K` quick search with one-click **Live Save** and portable `sp1_` `/sp applyedits` codes.
-- **Atomic Persistence & Live Verbose:** Crash-safe atomic JSON storage under `config/stonyperms/` and real-time permission decision tracing (`/sp verbose on`).
+- **Exact, Wildcard, Shorthand & Regex Evaluation:** Resolves exact nodes (`gate.command.server`), sub-wildcards (`gate.command.*`, `*`), explicit `false` denials, shorthand expansion (`{a,b}`, `(a|b)`, `{1-5}`), RE2 regular expressions (`r=...`), deterministic context-specificity tie-breaking, and circular inheritance protection.
+- **Primary Group Calculation & Tracks:** Supports `stored`, `parents-by-weight`, and `all-parents-by-weight` primary group resolution alongside ordered promotion tracks (`promote`, `demote`, `settrack`, `cleartrack`), cascading group rename (`/sp group <group> rename <new>`), and atomic track rename (`/sp track <track> rename <new>`).
+- **Dynamic Contexts, Temp Modifiers & Affix Stacking:** Per-server contexts (`server=lobby`) and expiring nodes/parents/meta/prefixes/suffixes with `accumulate`, `replace`, and `deny` collision modifiers, plus optional priority-ordered prefix/suffix stacking with custom spacers and deduplication.
+- **Multi-Backend Storage (`json`, `sqlite`, `mariadb`/`mysql`, `postgresql`):** Crash-safe atomic flat-file JSON by default or pure-Go (`CGO_ENABLED=0`) SQL databases implementing the canonical schema v1 defined in [`spec/SPEC.md`](spec/SPEC.md) — interoperable with [`stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge) standalone mode.
+- **v0.2 Scoped HTTP API & Live SSE Stream:** Opt-in cross-server synchronization (`GET /v1/events` SSE invalidation, `ETag` snapshots, batch queries, idempotent audited writes, and multi-token rotation) for Paper, Fabric, web stores, and stats pipelines.
+- **Built-In StonyPermsWeb Suite ([`andreisugu.github.io/gate-stonyperms`](https://andreisugu.github.io/gate-stonyperms/)):** Embedded (`//go:embed`) & GitHub-Pages-hosted Web Permissions Editor (`/sp editor`), Verbose Viewer (`/sp verbose record` + `paste`), Permission Tree Viewer (`/sp tree`), built-in Wiki, and `Ctrl+K` quick search with one-click **Live Save** and portable `sp1_` `/sp applyedits` codes.
+- **Cross-Language Conformance Spec (`spec/`):** Shared evaluation fixtures, mutation vectors, SQL schema v1, and SHA-256 manifest verified in CI alongside [`stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge).
 
 ---
 
@@ -49,7 +53,7 @@ github.com/andreisugu/gate-stonyperms
 
 ### In Go Code
 ```bash
-go get github.com/andreisugu/gate-stonyperms
+go get github.com/andreisugu/gate-stonyperms@v0.3.0
 ```
 
 ```go
@@ -72,11 +76,35 @@ func main() {
 
 ---
 
+## 🗄️ Storage Backends & Migration
+
+StonyPerms supports flat-file JSON alongside three pure-Go (`CGO_ENABLED=0` compatible) relational SQL drivers adhering to the canonical v1 schema in [`spec/SPEC.md`](spec/SPEC.md) §10:
+
+| Backend (`storage_type`) | Driver | Notes |
+| :--- | :--- | :--- |
+| **`json`** *(default)* | Built-in atomic JSON | Stores `groups.json`, `tracks.json`, `logs.json`, and `users/<uuid>.json` under `storage_dir`. Zero external services needed. |
+| **`sqlite`** / `sqlite3` | `modernc.org/sqlite` `v1.62.0` | Pure-Go embedded SQLite (`<storage_dir>/stonyperms.db` by default, or `[database].file`) with `WAL` journal mode and `foreign_keys=ON`. |
+| **`mariadb`** / **`mysql`** | `go-sql-driver/mysql` `v1.10.2` | Pure-Go MariaDB / MySQL wire driver using InnoDB tables and `utf8mb4_bin` collation on `meta_key` columns to preserve exact metadata key casing. |
+| **`postgresql`** / `postgres` | `jackc/pgx/v5` `v5.13.0` | Pure-Go PostgreSQL driver using `BIGSERIAL` log IDs, transactional upserts, and standard TLS/SSL modes (`disable`, `prefer`, `require`, `verify-ca`, `verify-full`, `skip-verify`). |
+
+### Credential Resolution Order
+Database passwords are resolved in priority order without committing secrets to TOML:
+1. `STONYPERMS_DB_PASSWORD` environment variable
+2. `database.password` inline string
+3. `database.password_file` file path (trailing CR/LF trimmed)
+
+### Migrating Between Backends
+1. Export your current dataset (works from JSON or SQL): `/sp export backup.json` *(or `.json.gz`)*.
+2. Update `storage_type` and `[database]` in `config/stonyperms.toml` and restart Gate.
+3. Restore cleanly into the new backend: `/sp import backup.json confirm`.
+
+---
+
 ## 🌐 StonyPermsWeb Suite
 
 | Tool | Command | What It Does |
 | :--- | :--- | :--- |
-| **Web Permissions Editor** | `/sp editor [filter]`<br>`/sp user <user> editor`<br>`/sp group <group> editor` | Edit groups, tracks, users, weights, prefixes/suffixes, expiry & contexts with autocomplete and **Live Save** (`POST /v1/editor/sessions/{token}/save`) or portable `/sp applyedits <code>`. |
+| **Web Permissions Editor** | `/sp editor [filter]`<br>`/sp user <user> editor`<br>`/sp group <group> editor`<br>`/sp track <track> editor` | Edit groups, tracks, users, weights, prefixes/suffixes, meta keys, expiry & contexts with autocomplete and **Live Save** (`POST /v1/editor/sessions/{token}/save`) or portable `/sp applyedits <code>`. |
 | **Verbose Viewer** | `/sp verbose record [filter]`<br>`/sp verbose paste` | Silently capture evaluated checks in Gate (`2000` bounded ring) and inspect `true` / `false` / `undefined` results & resolution sources in the browser. |
 | **Permission Tree** | `/sp tree [root]` | Browse registered Gate + stored + Paper/Fabric plugin permissions as an expandable tree. |
 | **Built-In Wiki & Demo** | [Live StonyPermsWeb](https://andreisugu.github.io/gate-stonyperms/) | Hosted on GitHub Pages with interactive **View Demo**, full command wiki, and `Ctrl+K` global search; embedded directly on Gate's HTTP server when `api_enabled = true`. |
@@ -118,11 +146,27 @@ Generated at `config/stonyperms.toml` (override path with `STONYPERMS_CONFIG`):
 
 ```toml
 default_group = "default"
-storage_type = "json"
+primary_group_calculation = "stored" # "stored" | "parents-by-weight" | "all-parents-by-weight"
+storage_type = "json"                # "json" | "sqlite" | "mysql" | "mariadb" | "postgresql"
 storage_dir = "config/stonyperms"
 apply_gate_permissions = true
 apply_server_contexts = true
 enable_audit_log = true
+
+[database]
+file = ""                            # Optional override for sqlite; defaults to <storage_dir>/stonyperms.db
+host = "127.0.0.1"
+port = 0                             # 0 uses engine default (3306 for mysql/mariadb, 5432 for postgresql)
+database = "stonyperms"
+username = "stonyperms"
+password = ""
+password_file = ""
+table_prefix = "stonyperms_"
+ssl_mode = "prefer"                  # disable | prefer | require | verify-ca | verify-full | skip-verify
+max_open_conns = 10
+max_idle_conns = 5
+conn_max_lifetime_seconds = 1800
+connect_timeout_seconds = 5
 
 api_enabled = false
 api_listen = "127.0.0.1:8737"
@@ -151,28 +195,7 @@ suffix_start_spacer = ""
 suffix_middle_spacer = ""
 suffix_end_spacer = ""
 stack_deduplicate = true
-
-# Optional relational storage (storage_type = "sqlite", "mysql", "mariadb", or "postgresql")
-[database]
-file = ""
-host = "127.0.0.1"
-port = 0
-database = "stonyperms"
-username = "stonyperms"
-password = ""
-password_file = ""
-table_prefix = "stonyperms_"
-ssl_mode = "prefer"
 ```
-
-### Storage Backends & Migration
-
-StonyPerms supports flat-file **`json`** (default) as well as pure-Go (`CGO_ENABLED=0` compatible) **`sqlite`**, **`mariadb`** / **`mysql`**, and **`postgresql`** using the canonical v1 relational schema shared identically with [`stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge):
-
-- **SQLite:** Set `storage_type = "sqlite"` (defaults to `<storage_dir>/stonyperms.db` in WAL mode with foreign keys enabled).
-- **MariaDB / MySQL:** Set `storage_type = "mariadb"` or `"mysql"`, host/database/username, and supply the password via `STONYPERMS_DB_PASSWORD`, `database.password_file`, or `database.password`.
-- **PostgreSQL:** Set `storage_type = "postgresql"` (or `"postgres"`), host/database/username/ssl_mode, and credential env/file.
-- **Migrating between backends:** Run `/sp export backup.json`, switch `storage_type` and `[database]` in `config/stonyperms.toml`, restart Gate, and run `/sp import backup.json confirm`.
 
 ---
 
@@ -184,9 +207,9 @@ StonyPerms supports flat-file **`json`** (default) as well as pure-Go (`CGO_ENAB
 
 | Command | Description |
 | :--- | :--- |
-| `/sp info` | Show loaded counts, storage status, and verbose state |
-| `/sp sync` / `/sp reload` | Hot-reload permissions data from disk |
-| `/sp networksync` | Reload storage & broadcast live SSE update across backends |
+| `/sp info` | Show loaded counts, storage engine/target, and verbose state |
+| `/sp sync` / `/sp reload` | Hot-reload permissions data from the active storage backend |
+| `/sp networksync` | Reload storage & broadcast live SSE update across connected backends |
 | `/sp search <permission\|group.<name>> [page]` | Search users and groups matching a node or parent |
 | `/sp bulkupdate <all\|users\|groups> <update\|delete> ...` | Preview (60s `confirm <code>`) or `--confirm` bulk changes |
 | `/sp export <file>` | Export groups, tracks & users to JSON or `.json.gz` |
@@ -291,11 +314,11 @@ StonyPerms supports flat-file **`json`** (default) as well as pure-Go (`CGO_ENAB
 
 ```go
 if mgr := stonyperms.GetManager(); mgr != nil {
-    user := mgr.GetUser(player.ID())
-    if mgr.HasPermission(user, "myplugin.special", map[string]string{"server": "lobby"}) {
-        // Allowed
-    }
-    prefix := mgr.GetPrefix(user, nil)
+	user := mgr.GetUser(player.ID())
+	if mgr.HasPermission(user, "myplugin.special", map[string]string{"server": "lobby"}) {
+		// Allowed
+	}
+	prefix := mgr.GetPrefix(user, nil)
 }
 ```
 
@@ -305,9 +328,9 @@ if mgr := stonyperms.GetManager(); mgr != nil {
 
 | Project | Role | Stack |
 | :--- | :--- | :--- |
-| **[`gate-stonyperms`](https://github.com/andreisugu/gate-stonyperms)** *(this repo)* | Context-aware permissions, tracks, Web UI & v0.2 R/W HTTP + SSE API | `Go 1.26` |
-| [`stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge) | Paper & Fabric permission adapters, live SSE, `/spb` commands, Vault & PAPI | `Java 25` |
-| [`gate-bettertab`](https://github.com/andreisugu/gate-bettertab) | Animated RGB / MiniMessage TAB lists, server groups, weights & placeholders | `Go 1.26` |
+| **[`gate-stonyperms`](https://github.com/andreisugu/gate-stonyperms)** *(this repo)* | Context-aware permissions, SQL/JSON storage, Web UI & v0.2 HTTP + SSE API | `Go 1.26` |
+| [`stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge) | Paper & Fabric standalone/bridge permissions, SQL/JSON, `/spb` & `/sp`, Vault & PAPI | `Java 25` |
+| [`gate-bettertab`](https://github.com/andreisugu/gate-bettertab) | Animated RGB / MiniMessage TAB lists, 1.21.2+ sorting, `/nick` & StonyPerms roles | `Go 1.26` |
 | [`gate-discord4gate`](https://github.com/andreisugu/gate-discord4gate) | Bidirectional Discord <> Minecraft chat, slash commands & webhook avatars | `Go 1.26` |
 | [`gate-hybridforwarding`](https://github.com/andreisugu/gate-hybridforwarding) | Per-backend Velocity Modern, Legacy BungeeCord, BungeeGuard & None forwarding | `Go 1.26` |
 | [`gate-simplewhitelist`](https://github.com/andreisugu/gate-simplewhitelist) | Lock-free `atomic.Pointer` whitelist by username, UUID, IP & CIDR | `Go 1.26` |
