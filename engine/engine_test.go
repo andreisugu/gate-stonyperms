@@ -176,4 +176,3 @@ func TestHigherGroupWildcardOverridesLowerGroupExactNegation(t *testing.T) {
 		t.Fatalf("expected True from admin group wildcard, got %v (source: %s)", res.Result, res.Source)
 	}
 }
-
