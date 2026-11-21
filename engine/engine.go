@@ -65,6 +65,7 @@ type StackConfig struct {
 type Engine struct {
 	mu            sync.RWMutex
 	stackCfg      StackConfig
+	primaryCalc   string
 	verboseActive bool
 	verboseFilter VerboseFilter
 	verboseLog    VerboseLogger
@@ -81,8 +82,71 @@ type Engine struct {
 // New creates a new permission calculation engine.
 func New() *Engine {
 	return &Engine{
-		stackCfg: StackConfig{Deduplicate: true},
+		stackCfg:    StackConfig{Deduplicate: true},
+		primaryCalc: "stored",
 	}
+}
+
+// SetPrimaryGroupCalculation sets how primary groups are computed:
+// "stored" (default), "parents-by-weight", or "all-parents-by-weight".
+func (e *Engine) SetPrimaryGroupCalculation(mode string) {
+	clean := strings.ToLower(strings.TrimSpace(mode))
+	switch clean {
+	case "parents-by-weight", "all-parents-by-weight":
+	default:
+		clean = "stored"
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.primaryCalc = clean
+}
+
+// GetPrimaryGroupCalculation returns the active primary group calculation mode.
+func (e *Engine) GetPrimaryGroupCalculation() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.primaryCalc == "" {
+		return "stored"
+	}
+	return e.primaryCalc
+}
+
+// ResolvePrimaryGroup determines a user's effective primary group using the active calculation mode.
+func (e *Engine) ResolvePrimaryGroup(user *model.User, groups map[string]*model.Group, contexts map[string]string, defaultGroup string) string {
+	if defaultGroup == "" {
+		defaultGroup = "default"
+	}
+	if user == nil {
+		return defaultGroup
+	}
+	mode := e.GetPrimaryGroupCalculation()
+	now := time.Now()
+	if mode == "parents-by-weight" {
+		var bestGroup *model.Group
+		for _, p := range user.Parents {
+			if p.IsExpired(now) || !p.MatchesContext(contexts) {
+				continue
+			}
+			if g, ok := groups[strings.ToLower(strings.TrimSpace(p.Group))]; ok && g != nil {
+				if bestGroup == nil || g.Weight > bestGroup.Weight {
+					bestGroup = g
+				}
+			}
+		}
+		if bestGroup != nil {
+			return bestGroup.Name
+		}
+	} else if mode == "all-parents-by-weight" {
+		resolved := e.ResolveInheritedGroups(user, groups, contexts, now)
+		if len(resolved) > 0 {
+			return resolved[0].Name
+		}
+	}
+	primary := strings.ToLower(strings.TrimSpace(user.PrimaryGroup))
+	if primary == "" {
+		return defaultGroup
+	}
+	return primary
 }
 
 // SetStackConfig updates prefix/suffix stacking behavior.
@@ -235,91 +299,34 @@ func (e *Engine) Evaluate(user *model.User, groups map[string]*model.Group, targ
 	targetPerm = strings.ToLower(strings.TrimSpace(targetPerm))
 	now := time.Now()
 
-	// 1. Direct User Exact Match
-	for _, node := range user.Nodes {
-		if node.IsExpired(now) || !node.MatchesContext(contexts) {
-			continue
-		}
-		if strings.EqualFold(node.Key, targetPerm) {
-			val := model.False
-			if node.Value {
-				val = model.True
-			}
-			return CheckResult{Result: val, Source: "user:direct", Node: &node}
-		}
-	}
-
-	// 2. Direct User Wildcards (find the most specific matching wildcard)
-	var bestUserWildcard *model.Node
-	for _, node := range user.Nodes {
-		if node.IsExpired(now) || !node.MatchesContext(contexts) {
-			continue
-		}
-		if node.MatchesPermission(targetPerm) {
-			if bestUserWildcard == nil || len(node.Key) > len(bestUserWildcard.Key) {
-				n := node
-				bestUserWildcard = &n
-			}
-		}
-	}
-	if bestUserWildcard != nil {
+	// 1 & 2. Direct User Nodes (exact > wildcard/regex, breaking ties by context specificity)
+	if node, exact := selectBestNode(user.Nodes, targetPerm, contexts, now); node != nil {
 		val := model.False
-		if bestUserWildcard.Value {
+		if node.Value {
 			val = model.True
 		}
-		return CheckResult{
-			Result: val,
-			Source: "user:wildcard (" + bestUserWildcard.Key + ")",
-			Node:   bestUserWildcard,
+		src := "user:direct"
+		if !exact {
+			src = "user:wildcard (" + node.Key + ")"
 		}
+		return CheckResult{Result: val, Source: src, Node: node}
 	}
 
 	// 3. Resolve Inherited Groups (sorted by Weight descending)
 	resolvedGroups := e.ResolveInheritedGroups(user, groups, contexts, now)
 
-	// 4. Evaluate Groups in Weight Order (Higher weight group completely overrides lower weight group)
+	// 4. Evaluate Groups in Weight Order (exact > wildcard/regex, higher context specificity wins)
 	for _, g := range resolvedGroups {
-		// 4a. Check exact match in group g
-		for _, node := range g.Nodes {
-			if node.IsExpired(now) || !node.MatchesContext(contexts) {
-				continue
-			}
-			if strings.EqualFold(node.Key, targetPerm) {
-				val := model.False
-				if node.Value {
-					val = model.True
-				}
-				return CheckResult{
-					Result: val,
-					Source: "group:" + g.Name,
-					Node:   &node,
-				}
-			}
-		}
-
-		// 4b. Check best wildcard match in group g
-		var bestGroupWildcard *model.Node
-		for _, node := range g.Nodes {
-			if node.IsExpired(now) || !node.MatchesContext(contexts) {
-				continue
-			}
-			if node.MatchesPermission(targetPerm) {
-				if bestGroupWildcard == nil || len(node.Key) > len(bestGroupWildcard.Key) {
-					n := node
-					bestGroupWildcard = &n
-				}
-			}
-		}
-		if bestGroupWildcard != nil {
+		if node, exact := selectBestNode(g.Nodes, targetPerm, contexts, now); node != nil {
 			val := model.False
-			if bestGroupWildcard.Value {
+			if node.Value {
 				val = model.True
 			}
-			return CheckResult{
-				Result: val,
-				Source: "group:" + g.Name + ":wildcard (" + bestGroupWildcard.Key + ")",
-				Node:   bestGroupWildcard,
+			src := "group:" + g.Name
+			if !exact {
+				src = "group:" + g.Name + ":wildcard (" + node.Key + ")"
 			}
+			return CheckResult{Result: val, Source: src, Node: node}
 		}
 	}
 
@@ -338,51 +345,64 @@ func (e *Engine) GroupPermissionValue(group *model.Group, groups map[string]*mod
 
 	// Evaluate in weight descending order
 	for _, g := range resolved {
-		// Exact match first within group
-		for _, node := range g.Nodes {
-			if node.IsExpired(now) || !node.MatchesContext(contexts) {
-				continue
-			}
-			if strings.EqualFold(node.Key, targetPerm) {
-				val := model.False
-				if node.Value {
-					val = model.True
-				}
-				return CheckResult{
-					Result: val,
-					Source: "group:" + g.Name,
-					Node:   &node,
-				}
-			}
-		}
-
-		// Wildcard match second within group
-		var best *model.Node
-		for _, node := range g.Nodes {
-			if node.IsExpired(now) || !node.MatchesContext(contexts) {
-				continue
-			}
-			if node.MatchesPermission(targetPerm) {
-				if best == nil || len(node.Key) > len(best.Key) {
-					n := node
-					best = &n
-				}
-			}
-		}
-		if best != nil {
+		if node, exact := selectBestNode(g.Nodes, targetPerm, contexts, now); node != nil {
 			val := model.False
-			if best.Value {
+			if node.Value {
 				val = model.True
 			}
-			return CheckResult{
-				Result: val,
-				Source: "group:" + g.Name + ":wildcard (" + best.Key + ")",
-				Node:   best,
+			src := "group:" + g.Name
+			if !exact {
+				src = "group:" + g.Name + ":wildcard (" + node.Key + ")"
 			}
+			return CheckResult{Result: val, Source: src, Node: node}
 		}
 	}
 
 	return CheckResult{Result: model.Undefined, Source: "default (undefined)"}
+}
+
+func selectBestNode(nodes []model.Node, targetPerm string, contexts map[string]string, now time.Time) (*model.Node, bool) {
+	var best *model.Node
+	bestExact := false
+	bestSpec := 0
+	for _, n := range nodes {
+		if n.IsExpired(now) || !n.MatchesContext(contexts) {
+			continue
+		}
+		matched, exact, spec := model.EvaluateNodeMatch(n.Key, targetPerm)
+		if !matched {
+			continue
+		}
+		better := false
+		if best == nil {
+			better = true
+		} else if exact != bestExact {
+			better = exact
+		} else if exact {
+			if len(n.Contexts) != len(best.Contexts) {
+				better = len(n.Contexts) > len(best.Contexts)
+			} else if spec != bestSpec {
+				better = spec > bestSpec
+			} else if !n.Value && best.Value {
+				better = true
+			}
+		} else {
+			if spec != bestSpec {
+				better = spec > bestSpec
+			} else if len(n.Contexts) != len(best.Contexts) {
+				better = len(n.Contexts) > len(best.Contexts)
+			} else if !n.Value && best.Value {
+				better = true
+			}
+		}
+		if better {
+			cpy := n
+			best = &cpy
+			bestExact = exact
+			bestSpec = spec
+		}
+	}
+	return best, bestExact
 }
 
 // ResolveInheritedGroups builds an ordered, deduplicated slice of groups inherited by the user (weight descending).
@@ -609,7 +629,7 @@ func (e *Engine) resolveAffix(
 		return best.Value
 	}
 
-	primary := strings.ToLower(strings.TrimSpace(user.PrimaryGroup))
+	primary := e.ResolvePrimaryGroup(user, groups, contexts, "default")
 	if primary != "" && primary != "default" {
 		if pg, ok := groups[primary]; ok && pg != nil {
 			if best := highestActiveAffix(groupAffixes(pg), contexts, now); best != nil {

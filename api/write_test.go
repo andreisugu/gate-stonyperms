@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -847,5 +848,122 @@ func TestIdempotencyQueryParameterCanonicalizationAndConflict(t *testing.T) {
 	snap, found, _ := mgr.UserSnapshot(uid)
 	if !found || len(snap.Nodes) != 1 || snap.Nodes[0].Key != "perm.b" {
 		t.Fatalf("expected perm.b to remain untouched after conflict, got %+v", snap)
+	}
+}
+
+func TestAPISearchBulkUpdateModifiersMetaTracksAndAffixes(t *testing.T) {
+	srv, mgr := newWriteTestServer(t)
+	h := srv.Handler()
+
+	mustJSON := func(v any) []byte {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("json marshal: %v", err)
+		}
+		return b
+	}
+
+	// Create groups + track
+	createGrp := doWriteRequest(t, h, http.MethodPost, "/v1/groups", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"name": "vip", "weight": 20, "displayName": "VIP",
+	}))
+	if createGrp.Code != http.StatusCreated {
+		t.Fatalf("create vip: %d %s", createGrp.Code, createGrp.Body.String())
+	}
+	if _, err := mgr.CreateGroup("mvp", 40, "MVP"); err != nil {
+		t.Fatalf("create mvp: %v", err)
+	}
+	tr, _ := mgr.CreateTrack("api_parity_ranks")
+	_ = tr.Append("default")
+	_ = tr.Append("vip")
+	_ = tr.Append("mvp")
+	_ = mgr.SaveTrack(tr)
+
+	uid := uuid.New()
+	if res := doWriteRequest(t, h, http.MethodPost, "/v1/users", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"uuid": uid.String(), "username": "ParityAPIUser", "createOffline": true,
+	})); res.Code != http.StatusCreated && res.Code != http.StatusOK {
+		t.Fatalf("ensure user: %d %s", res.Code, res.Body.String())
+	}
+
+	// 1. Primary group PUT auto-inherits vip
+	pgRes := doWriteRequest(t, h, http.MethodPut, "/v1/users/"+uid.String()+"/primary-group", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"group": "vip",
+	}))
+	if pgRes.Code != http.StatusOK {
+		t.Fatalf("put primary group: %d %s", pgRes.Code, pgRes.Body.String())
+	}
+	if u := mgr.GetUser(uid); len(u.Parents) == 0 || u.Parents[0].Group != "vip" {
+		t.Fatalf("expected PUT primary-group to auto-inherit vip, got %+v", u.Parents)
+	}
+
+	// 2. Temporary permission modifiers: accumulate & deny
+	rPerm1 := doWriteRequest(t, h, http.MethodPost, "/v1/users/"+uid.String()+"/permissions", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"key": "essentials.fly", "value": true, "durationSeconds": 3600, "modifier": "accumulate",
+	}))
+	if rPerm1.Code != http.StatusOK {
+		t.Fatalf("perm accumulate 1: %d %s", rPerm1.Code, rPerm1.Body.String())
+	}
+	rPerm2 := doWriteRequest(t, h, http.MethodPost, "/v1/users/"+uid.String()+"/permissions", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"key": "essentials.fly", "value": true, "durationSeconds": 1800, "modifier": "accumulate",
+	}))
+	if rPerm2.Code != http.StatusOK {
+		t.Fatalf("perm accumulate 2: %d %s", rPerm2.Code, rPerm2.Body.String())
+	}
+	rPermDeny := doWriteRequest(t, h, http.MethodPost, "/v1/users/"+uid.String()+"/permissions", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"key": "essentials.fly", "value": true, "durationSeconds": 600, "modifier": "deny",
+	}))
+	assertErrorCode(t, rPermDeny, http.StatusConflict, "temp_entry_exists")
+
+	// 3. Contextual/temporary meta & tempOnly delete
+	rMeta := doWriteRequest(t, h, http.MethodPut, "/v1/users/"+uid.String()+"/meta/boost", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"value": "2x", "durationSeconds": 3600, "contexts": map[string]string{"server": "survival"},
+	}))
+	if rMeta.Code != http.StatusOK {
+		t.Fatalf("contextual meta: %d %s", rMeta.Code, rMeta.Body.String())
+	}
+	rMetaDel := doWriteRequest(t, h, http.MethodDelete, "/v1/users/"+uid.String()+"/meta/boost?tempOnly=true&server=survival", testWriteToken, "ops", "", nil)
+	if rMetaDel.Code != http.StatusOK {
+		t.Fatalf("delete temp meta: %d %s", rMetaDel.Code, rMetaDel.Body.String())
+	}
+
+	// 4. Affix mode=set replaces previous context prefixes
+	_ = doWriteRequest(t, h, http.MethodPost, "/v1/users/"+uid.String()+"/prefixes", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"priority": 10, "value": "[One] ",
+	}))
+	rAffixSet := doWriteRequest(t, h, http.MethodPost, "/v1/users/"+uid.String()+"/prefixes", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"priority": 50, "value": "[Only] ", "mode": "set",
+	}))
+	if rAffixSet.Code != http.StatusOK {
+		t.Fatalf("affix set mode: %d %s", rAffixSet.Code, rAffixSet.Body.String())
+	}
+	if u := mgr.GetUser(uid); len(u.Prefixes) != 1 || u.Prefixes[0].Value != "[Only] " {
+		t.Fatalf("expected mode=set to replace global prefixes, got %+v", u.Prefixes)
+	}
+
+	// 5. GET /v1/search & POST /v1/bulkupdate
+	sr := doRequest(t, h, http.MethodGet, "/v1/search?q=essentials.fly", testToken, nil)
+	if sr.Code != http.StatusOK || !strings.Contains(sr.Body.String(), "ParityAPIUser") {
+		t.Fatalf("GET /v1/search: %d %s", sr.Code, sr.Body.String())
+	}
+	bu := doWriteRequest(t, h, http.MethodPost, "/v1/bulkupdate", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"scope": "users", "action": "update", "field": "permission", "value": "essentials.fly.v2",
+		"constraints": []map[string]string{{"field": "permission", "operator": "==", "pattern": "essentials.fly"}},
+	}))
+	if bu.Code != http.StatusOK || !mgr.HasPermission(mgr.GetUser(uid), "essentials.fly.v2", nil) {
+		t.Fatalf("POST /v1/bulkupdate: %d %s", bu.Code, bu.Body.String())
+	}
+
+	// 6. Track set & clear routes on user & group
+	ts := doWriteRequest(t, h, http.MethodPost, "/v1/users/"+uid.String()+"/tracks/api_parity_ranks", testWriteToken, "ops", "", mustJSON(map[string]any{
+		"group": "mvp",
+	}))
+	if ts.Code != http.StatusOK {
+		t.Fatalf("POST user track: %d %s", ts.Code, ts.Body.String())
+	}
+	tc := doWriteRequest(t, h, http.MethodDelete, "/v1/users/"+uid.String()+"/tracks/api_parity_ranks", testWriteToken, "ops", "", nil)
+	if tc.Code != http.StatusOK {
+		t.Fatalf("DELETE user track: %d %s", tc.Code, tc.Body.String())
 	}
 }

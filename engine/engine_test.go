@@ -283,3 +283,68 @@ func TestStackingAndContextualMeta(t *testing.T) {
 		t.Fatalf("lobby homes = (%q, %v), want (1, true)", v, ok)
 	}
 }
+
+func TestContextSpecificityShorthandRegexAndPrimaryGroupCalc(t *testing.T) {
+	eng := New()
+
+	def := model.NewGroup("default", 0)
+	vip := model.NewGroup("vip", 30)
+	vip.Prefixes = []model.PriorityMeta{{Priority: 30, Value: "[VIP] "}}
+	mod := model.NewGroup("mod", 80)
+	mod.Parents = []model.Inheritance{model.NewInheritance("vip")}
+	mod.Prefixes = []model.PriorityMeta{{Priority: 80, Value: "[Mod] "}}
+	groups := map[string]*model.Group{
+		"default": def,
+		"vip":     vip,
+		"mod":     mod,
+	}
+
+	u := model.NewUser(uuid.New(), "Parity2User")
+	u.PrimaryGroup = "default"
+	u.AddNode(model.Node{Key: "essentials.fly", Value: false}) // global deny
+	u.AddNode(model.Node{
+		Key:      "essentials.fly",
+		Value:    true,
+		Contexts: map[string]string{"server": "creative"},
+	}) // more specific context allow should beat global exact
+	u.AddNode(model.Node{Key: "essentials.{home,warp}", Value: true})
+	u.AddNode(model.Node{Key: "r=essentials\\.kit\\.[a-z]+", Value: true})
+
+	if res := eng.Evaluate(u, groups, "essentials.fly", map[string]string{"server": "lobby"}); res.Result != model.False {
+		t.Fatalf("lobby essentials.fly = %v, want false", res.Result)
+	}
+	if res := eng.Evaluate(u, groups, "essentials.fly", map[string]string{"server": "creative"}); res.Result != model.True {
+		t.Fatalf("creative essentials.fly = %v, want true (context override)", res.Result)
+	}
+	if res := eng.Evaluate(u, groups, "essentials.warp", nil); res.Result != model.True {
+		t.Fatalf("shorthand essentials.warp = %v, want true", res.Result)
+	}
+	if res := eng.Evaluate(u, groups, "essentials.kit.starter", nil); res.Result != model.True {
+		t.Fatalf("regex essentials.kit.starter = %v, want true", res.Result)
+	}
+
+	// Primary group calculation modes
+	u.AddParent(model.Inheritance{
+		Group:    "vip",
+		Contexts: map[string]string{"server": "lobby"},
+	})
+	u.AddParent(model.Inheritance{
+		Group:    "mod",
+		Contexts: map[string]string{"server": "survival"},
+	})
+
+	if pg := eng.ResolvePrimaryGroup(u, groups, map[string]string{"server": "survival"}, "default"); pg != "default" {
+		t.Fatalf("stored mode primary = %q, want default", pg)
+	}
+	eng.SetPrimaryGroupCalculation("parents-by-weight")
+	if pg := eng.ResolvePrimaryGroup(u, groups, map[string]string{"server": "lobby"}, "default"); pg != "vip" {
+		t.Fatalf("parents-by-weight lobby primary = %q, want vip", pg)
+	}
+	if got := eng.GetPrefix(u, groups, map[string]string{"server": "survival"}); got != "[Mod] " {
+		t.Fatalf("survival prefix with parents-by-weight = %q, want [Mod] ", got)
+	}
+	eng.SetPrimaryGroupCalculation("all-parents-by-weight")
+	if pg := eng.ResolvePrimaryGroup(u, groups, map[string]string{"server": "survival"}, "default"); pg != "mod" {
+		t.Fatalf("all-parents-by-weight survival primary = %q, want mod", pg)
+	}
+}

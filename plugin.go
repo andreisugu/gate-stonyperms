@@ -138,6 +138,7 @@ var Plugin = proxy.Plugin{
 			SuffixEndSpacer:   cfg.SuffixEndSpacer,
 			Deduplicate:       cfg.StackDeduplicate,
 		})
+		mgr.Engine().SetPrimaryGroupCalculation(cfg.PrimaryGroupCalculation)
 
 		// Start the optional HTTP API used by backend adapters and integrations.
 		// A configuration error disables the API (or write tier) without

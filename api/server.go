@@ -327,6 +327,7 @@ func (s *Server) routes() http.Handler {
 
 	mux.Handle("GET /v1/tracks", s.readRoute(s.handleTracks))
 	mux.Handle("GET /v1/tracks/{name}", s.readRoute(s.handleTrack))
+	mux.Handle("GET /v1/search", s.readRoute(s.handleSearch))
 
 	// Write-tier user routes
 	mux.Handle("POST /v1/users", s.writeRoute(s.handleEnsureUser, true))
@@ -371,6 +372,11 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("DELETE /v1/tracks/{name}", s.writeRoute(s.handleDeleteTrack, true))
 	mux.Handle("GET /v1/logs", s.writeRoute(s.handleLogs, false))
 	mux.Handle("POST /v1/reload", s.writeRoute(s.handleReload, true))
+	mux.Handle("POST /v1/bulkupdate", s.writeRoute(s.handleBulkUpdate, true))
+	mux.Handle("POST /v1/users/{id}/tracks/{track}", s.writeRoute(s.handleUserTrackSet, true))
+	mux.Handle("DELETE /v1/users/{id}/tracks/{track}", s.writeRoute(s.handleUserTrackClear, true))
+	mux.Handle("POST /v1/groups/{name}/tracks/{track}", s.writeRoute(s.handleGroupTrackSet, true))
+	mux.Handle("DELETE /v1/groups/{name}/tracks/{track}", s.writeRoute(s.handleGroupTrackClear, true))
 
 	return securityHeaders(mux)
 }
@@ -863,4 +869,20 @@ func LoadToken(inline, tokenFile string) (string, error) {
 		return "", err
 	}
 	return tokens[0], nil
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		writeError(w, http.StatusBadRequest, "invalid_query", "query parameter q is required")
+		return
+	}
+	res := s.mgr.Search(q)
+	rev := s.mgr.Revision()
+	writeJSON(w, http.StatusOK, searchResponse{
+		Revision:  rev,
+		Query:     res.Query,
+		GroupHits: res.GroupHits,
+		UserHits:  res.UserHits,
+	})
 }

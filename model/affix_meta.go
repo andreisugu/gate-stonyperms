@@ -86,6 +86,12 @@ func resolveExpiryWithModifier(existingExpiry, newExpiry int64, isExpired bool, 
 	if mod == "" {
 		mod = TempModifierReplace
 	}
+	if existingExpiry <= 0 {
+		if mod == TempModifierDeny {
+			return 0, ErrTempEntryExists
+		}
+		return 0, nil
+	}
 	switch mod {
 	case TempModifierDeny:
 		if !isExpired {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -204,5 +205,33 @@ func TestOfflinePortableSessionURLAndTreeVerbose(t *testing.T) {
 	treeData, ok := mgr.GetTreeSession(tr.Token)
 	if !ok || treeData.Metadata.Root != "gate" {
 		t.Fatalf("unexpected tree session: ok=%v data=%+v", ok, treeData)
+	}
+}
+
+func TestEditorPreservesContextualAndTempMetaEntries(t *testing.T) {
+	mgr := newWebTestManager(t)
+	g := model.NewGroup("vip", 20)
+	_ = mgr.SaveGroup(g)
+
+	now := time.Now().UTC()
+	payload := EditorSavePayload{
+		Groups: []model.Group{{
+			Name:   "vip",
+			Weight: 20,
+			Meta:   map[string]string{"color": "aqua"},
+			MetaEntries: []model.MetaEntry{{
+				Key:      "homes",
+				Value:    "5",
+				Expiry:   now.Add(2 * time.Hour).Unix(),
+				Contexts: map[string]string{"server": "survival"},
+			}},
+		}},
+	}
+	if _, err := mgr.ApplyEditorPayload("Console", payload); err != nil {
+		t.Fatalf("ApplyEditorPayload: %v", err)
+	}
+	saved := mgr.GetGroup("vip")
+	if saved == nil || len(saved.MetaEntries) != 2 {
+		t.Fatalf("expected 2 synchronized MetaEntries on group, got %+v", saved)
 	}
 }
