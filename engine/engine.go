@@ -113,6 +113,11 @@ func (e *Engine) GetPrimaryGroupCalculation() string {
 
 // ResolvePrimaryGroup determines a user's effective primary group using the active calculation mode.
 func (e *Engine) ResolvePrimaryGroup(user *model.User, groups map[string]*model.Group, contexts map[string]string, defaultGroup string) string {
+	return e.ResolvePrimaryGroupAt(user, groups, contexts, defaultGroup, time.Now())
+}
+
+// ResolvePrimaryGroupAt determines a user's effective primary group using the active calculation mode at now.
+func (e *Engine) ResolvePrimaryGroupAt(user *model.User, groups map[string]*model.Group, contexts map[string]string, defaultGroup string, now time.Time) string {
 	if defaultGroup == "" {
 		defaultGroup = "default"
 	}
@@ -120,7 +125,6 @@ func (e *Engine) ResolvePrimaryGroup(user *model.User, groups map[string]*model.
 		return defaultGroup
 	}
 	mode := e.GetPrimaryGroupCalculation()
-	now := time.Now()
 	if mode == "parents-by-weight" {
 		var bestGroup *model.Group
 		for _, p := range user.Parents {
@@ -128,7 +132,7 @@ func (e *Engine) ResolvePrimaryGroup(user *model.User, groups map[string]*model.
 				continue
 			}
 			if g, ok := groups[strings.ToLower(strings.TrimSpace(p.Group))]; ok && g != nil {
-				if bestGroup == nil || g.Weight > bestGroup.Weight {
+				if bestGroup == nil || g.Weight > bestGroup.Weight || (g.Weight == bestGroup.Weight && g.Name < bestGroup.Name) {
 					bestGroup = g
 				}
 			}
@@ -252,28 +256,37 @@ func matchesFilter(f VerboseFilter, subject, perm string) bool {
 
 // PermissionValue evaluates the permission for a user with given groups and context.
 func (e *Engine) PermissionValue(user *model.User, groups map[string]*model.Group, targetPerm string, contexts map[string]string) model.Tristate {
-	res := e.Evaluate(user, groups, targetPerm, contexts)
+	return e.PermissionValueAt(user, groups, targetPerm, contexts, time.Now())
+}
+
+// PermissionValueAt evaluates the permission for a user with given groups and context at now.
+func (e *Engine) PermissionValueAt(user *model.User, groups map[string]*model.Group, targetPerm string, contexts map[string]string, now time.Time) model.Tristate {
+	res := e.EvaluateAt(user, groups, targetPerm, contexts, now)
+	subject := ""
+	if user != nil {
+		subject = user.Username
+	}
 
 	e.mu.RLock()
-	needChat := e.verboseActive && e.verboseLog != nil && matchesFilter(e.verboseFilter, user.Username, targetPerm)
+	needChat := e.verboseActive && e.verboseLog != nil && matchesFilter(e.verboseFilter, subject, targetPerm)
 	chatLogger := e.verboseLog
-	needRecord := e.recordActive && matchesFilter(e.recordFilter, user.Username, targetPerm)
+	needRecord := e.recordActive && matchesFilter(e.recordFilter, subject, targetPerm)
 	e.mu.RUnlock()
 
 	if needChat {
-		chatLogger(user.Username, targetPerm, res.Result, res.Source)
+		chatLogger(subject, targetPerm, res.Result, res.Source)
 	}
 	if needRecord {
-		nowMs := time.Now().UTC().UnixMilli()
+		nowMs := now.UTC().UnixMilli()
 		entry := VerboseEntry{
-			Subject:    user.Username,
+			Subject:    subject,
 			Permission: targetPerm,
 			Result:     strings.ToLower(res.Result.String()),
 			Source:     res.Source,
 			Timestamp:  nowMs,
 		}
 		e.mu.Lock()
-		if e.recordActive && matchesFilter(e.recordFilter, user.Username, targetPerm) {
+		if e.recordActive && matchesFilter(e.recordFilter, subject, targetPerm) {
 			e.recordTotal++
 			if nowMs > e.recordEnd {
 				e.recordEnd = nowMs
@@ -292,12 +305,16 @@ func (e *Engine) PermissionValue(user *model.User, groups map[string]*model.Grou
 
 // Evaluate runs full permission evaluation and returns the detailed CheckResult.
 func (e *Engine) Evaluate(user *model.User, groups map[string]*model.Group, targetPerm string, contexts map[string]string) CheckResult {
+	return e.EvaluateAt(user, groups, targetPerm, contexts, time.Now())
+}
+
+// EvaluateAt runs full permission evaluation at now and returns the detailed CheckResult.
+func (e *Engine) EvaluateAt(user *model.User, groups map[string]*model.Group, targetPerm string, contexts map[string]string, now time.Time) CheckResult {
 	if user == nil {
 		return CheckResult{Result: model.Undefined, Source: "none (nil user)"}
 	}
 
 	targetPerm = strings.ToLower(strings.TrimSpace(targetPerm))
-	now := time.Now()
 
 	// 1 & 2. Direct User Nodes (exact > wildcard/regex, breaking ties by context specificity)
 	if node, exact := selectBestNode(user.Nodes, targetPerm, contexts, now); node != nil {
@@ -312,7 +329,7 @@ func (e *Engine) Evaluate(user *model.User, groups map[string]*model.Group, targ
 		return CheckResult{Result: val, Source: src, Node: node}
 	}
 
-	// 3. Resolve Inherited Groups (sorted by Weight descending)
+	// 3. Resolve Inherited Groups (sorted by Weight descending, then Name ascending)
 	resolvedGroups := e.ResolveInheritedGroups(user, groups, contexts, now)
 
 	// 4. Evaluate Groups in Weight Order (exact > wildcard/regex, higher context specificity wins)
@@ -335,11 +352,15 @@ func (e *Engine) Evaluate(user *model.User, groups map[string]*model.Group, targ
 
 // GroupPermissionValue evaluates permission on a group directly (including its parent hierarchy).
 func (e *Engine) GroupPermissionValue(group *model.Group, groups map[string]*model.Group, targetPerm string, contexts map[string]string) CheckResult {
+	return e.GroupPermissionValueAt(group, groups, targetPerm, contexts, time.Now())
+}
+
+// GroupPermissionValueAt evaluates permission on a group directly at now (including its parent hierarchy).
+func (e *Engine) GroupPermissionValueAt(group *model.Group, groups map[string]*model.Group, targetPerm string, contexts map[string]string, now time.Time) CheckResult {
 	if group == nil {
 		return CheckResult{Result: model.Undefined, Source: "none (nil group)"}
 	}
 	targetPerm = strings.ToLower(strings.TrimSpace(targetPerm))
-	now := time.Now()
 
 	resolved := e.ResolveGroupHierarchy(group, groups, contexts, now)
 
@@ -445,9 +466,12 @@ func (e *Engine) ResolveInheritedGroups(user *model.User, groups map[string]*mod
 		visit("default")
 	}
 
-	// Sort groups by Weight descending
+	// Sort groups by Weight descending, tie-breaking alphabetically by Name
 	sort.SliceStable(result, func(i, j int) bool {
-		return result[i].Weight > result[j].Weight
+		if result[i].Weight != result[j].Weight {
+			return result[i].Weight > result[j].Weight
+		}
+		return result[i].Name < result[j].Name
 	})
 
 	return result
@@ -482,7 +506,10 @@ func (e *Engine) ResolveGroupHierarchy(root *model.Group, groups map[string]*mod
 	visit(root)
 
 	sort.SliceStable(result, func(i, j int) bool {
-		return result[i].Weight > result[j].Weight
+		if result[i].Weight != result[j].Weight {
+			return result[i].Weight > result[j].Weight
+		}
+		return result[i].Name < result[j].Name
 	})
 
 	return result
@@ -491,58 +518,82 @@ func (e *Engine) ResolveGroupHierarchy(root *model.Group, groups map[string]*mod
 // GetPrefix resolves the user's prefix, using prefix stacking if enabled or
 // primary-group priority precedence otherwise.
 func (e *Engine) GetPrefix(user *model.User, groups map[string]*model.Group, contexts map[string]string) string {
+	return e.GetPrefixAt(user, groups, contexts, time.Now())
+}
+
+// GetPrefixAt resolves the user's prefix at now, using prefix stacking if enabled or
+// primary-group priority precedence otherwise.
+func (e *Engine) GetPrefixAt(user *model.User, groups map[string]*model.Group, contexts map[string]string, now time.Time) string {
 	if user == nil {
 		return ""
 	}
 	stackCfg := e.GetStackConfig()
 	if stackCfg.PrefixEnabled {
-		if stacked := e.GetStackedPrefix(user, groups, contexts); stacked != "" {
+		if stacked := e.GetStackedPrefixAt(user, groups, contexts, now); stacked != "" {
 			return stacked
 		}
 	}
-	return e.resolveAffix(user, groups, contexts, user.Prefixes, func(g *model.Group) []model.PriorityMeta {
+	return e.resolveAffixAt(user, groups, contexts, user.Prefixes, func(g *model.Group) []model.PriorityMeta {
 		return g.Prefixes
-	})
+	}, now)
 }
 
 // GetSuffix resolves the user's suffix, using suffix stacking if enabled or
 // primary-group priority precedence otherwise.
 func (e *Engine) GetSuffix(user *model.User, groups map[string]*model.Group, contexts map[string]string) string {
+	return e.GetSuffixAt(user, groups, contexts, time.Now())
+}
+
+// GetSuffixAt resolves the user's suffix at now, using suffix stacking if enabled or
+// primary-group priority precedence otherwise.
+func (e *Engine) GetSuffixAt(user *model.User, groups map[string]*model.Group, contexts map[string]string, now time.Time) string {
 	if user == nil {
 		return ""
 	}
 	stackCfg := e.GetStackConfig()
 	if stackCfg.SuffixEnabled {
-		if stacked := e.GetStackedSuffix(user, groups, contexts); stacked != "" {
+		if stacked := e.GetStackedSuffixAt(user, groups, contexts, now); stacked != "" {
 			return stacked
 		}
 	}
-	return e.resolveAffix(user, groups, contexts, user.Suffixes, func(g *model.Group) []model.PriorityMeta {
+	return e.resolveAffixAt(user, groups, contexts, user.Suffixes, func(g *model.Group) []model.PriorityMeta {
 		return g.Suffixes
-	})
+	}, now)
 }
 
 // GetStackedPrefix formats all active context-matching prefixes ordered by priority descending.
 func (e *Engine) GetStackedPrefix(user *model.User, groups map[string]*model.Group, contexts map[string]string) string {
+	return e.GetStackedPrefixAt(user, groups, contexts, time.Now())
+}
+
+// GetStackedPrefixAt formats all active context-matching prefixes at now ordered by priority descending.
+func (e *Engine) GetStackedPrefixAt(user *model.User, groups map[string]*model.Group, contexts map[string]string, now time.Time) string {
 	stackCfg := e.GetStackConfig()
-	return e.formatStackedAffix(
+	return e.formatStackedAffixAt(
 		user, groups, contexts,
 		user.Prefixes, func(g *model.Group) []model.PriorityMeta { return g.Prefixes },
 		stackCfg.PrefixStartSpacer, stackCfg.PrefixMidSpacer, stackCfg.PrefixEndSpacer, stackCfg.Deduplicate,
+		now,
 	)
 }
 
 // GetStackedSuffix formats all active context-matching suffixes ordered by priority descending.
 func (e *Engine) GetStackedSuffix(user *model.User, groups map[string]*model.Group, contexts map[string]string) string {
+	return e.GetStackedSuffixAt(user, groups, contexts, time.Now())
+}
+
+// GetStackedSuffixAt formats all active context-matching suffixes at now ordered by priority descending.
+func (e *Engine) GetStackedSuffixAt(user *model.User, groups map[string]*model.Group, contexts map[string]string, now time.Time) string {
 	stackCfg := e.GetStackConfig()
-	return e.formatStackedAffix(
+	return e.formatStackedAffixAt(
 		user, groups, contexts,
 		user.Suffixes, func(g *model.Group) []model.PriorityMeta { return g.Suffixes },
 		stackCfg.SuffixStartSpacer, stackCfg.SuffixMidSpacer, stackCfg.SuffixEndSpacer, stackCfg.Deduplicate,
+		now,
 	)
 }
 
-func (e *Engine) formatStackedAffix(
+func (e *Engine) formatStackedAffixAt(
 	user *model.User,
 	groups map[string]*model.Group,
 	contexts map[string]string,
@@ -550,11 +601,11 @@ func (e *Engine) formatStackedAffix(
 	groupAffixes func(*model.Group) []model.PriorityMeta,
 	startSpacer, midSpacer, endSpacer string,
 	deduplicate bool,
+	now time.Time,
 ) string {
 	if user == nil {
 		return ""
 	}
-	now := time.Now()
 	type rankedAffix struct {
 		priority int
 		ctxCount int
@@ -622,19 +673,19 @@ func highestActiveAffix(items []model.PriorityMeta, contexts map[string]string, 
 	return highest
 }
 
-func (e *Engine) resolveAffix(
+func (e *Engine) resolveAffixAt(
 	user *model.User,
 	groups map[string]*model.Group,
 	contexts map[string]string,
 	direct []model.PriorityMeta,
 	groupAffixes func(*model.Group) []model.PriorityMeta,
+	now time.Time,
 ) string {
-	now := time.Now()
 	if best := highestActiveAffix(direct, contexts, now); best != nil {
 		return best.Value
 	}
 
-	primary := e.ResolvePrimaryGroup(user, groups, contexts, "default")
+	primary := e.ResolvePrimaryGroupAt(user, groups, contexts, "default", now)
 	if primary != "" && primary != "default" {
 		if pg, ok := groups[primary]; ok && pg != nil {
 			if best := highestActiveAffix(groupAffixes(pg), contexts, now); best != nil {
@@ -646,7 +697,8 @@ func (e *Engine) resolveAffix(
 	var highest *model.PriorityMeta
 	for _, g := range e.ResolveInheritedGroups(user, groups, contexts, now) {
 		candidate := highestActiveAffix(groupAffixes(g), contexts, now)
-		if candidate != nil && (highest == nil || candidate.Priority > highest.Priority) {
+		if candidate != nil && (highest == nil || candidate.Priority > highest.Priority ||
+			(candidate.Priority == highest.Priority && len(candidate.Contexts) > len(highest.Contexts))) {
 			highest = candidate
 		}
 	}
@@ -663,13 +715,23 @@ func (e *Engine) GetMeta(user *model.User, groups map[string]*model.Group, key s
 
 // GetMetaWithContext resolves a custom metadata key honoring active contextual and temporary entries.
 func (e *Engine) GetMetaWithContext(user *model.User, groups map[string]*model.Group, key string, contexts map[string]string) (string, bool) {
-	all := e.ResolveAllMeta(user, groups, contexts)
+	return e.GetMetaWithContextAt(user, groups, key, contexts, time.Now())
+}
+
+// GetMetaWithContextAt resolves a custom metadata key at now honoring active contextual and temporary entries.
+func (e *Engine) GetMetaWithContextAt(user *model.User, groups map[string]*model.Group, key string, contexts map[string]string, now time.Time) (string, bool) {
+	all := e.ResolveAllMetaAt(user, groups, contexts, now)
 	if val, ok := all[key]; ok {
 		return val, true
 	}
-	for k, v := range all {
+	keys := make([]string, 0, len(all))
+	for k := range all {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
 		if strings.EqualFold(k, key) {
-			return v, true
+			return all[k], true
 		}
 	}
 	return "", false
@@ -679,11 +741,15 @@ func (e *Engine) GetMetaWithContext(user *model.User, groups map[string]*model.G
 // Resolution priority: user MetaEntries (most specific context -> highest priority) > user Meta >
 // resolved groups in descending weight order (group MetaEntries > group Meta).
 func (e *Engine) ResolveAllMeta(user *model.User, groups map[string]*model.Group, contexts map[string]string) map[string]string {
+	return e.ResolveAllMetaAt(user, groups, contexts, time.Now())
+}
+
+// ResolveAllMetaAt computes all effective metadata keys for a user at now in the supplied contexts.
+func (e *Engine) ResolveAllMetaAt(user *model.User, groups map[string]*model.Group, contexts map[string]string, now time.Time) map[string]string {
 	result := make(map[string]string)
 	if user == nil {
 		return result
 	}
-	now := time.Now()
 
 	applyMetaEntries := func(entries []model.MetaEntry, staticMeta map[string]string) {
 		var matching []model.MetaEntry
@@ -703,9 +769,16 @@ func (e *Engine) ResolveAllMeta(user *model.User, groups map[string]*model.Group
 				result[entry.Key] = entry.Value
 			}
 		}
-		for k, v := range staticMeta {
-			if _, exists := result[k]; !exists {
-				result[k] = v
+		if len(staticMeta) > 0 {
+			keys := make([]string, 0, len(staticMeta))
+			for k := range staticMeta {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				if _, exists := result[k]; !exists {
+					result[k] = staticMeta[k]
+				}
 			}
 		}
 	}
