@@ -15,6 +15,8 @@ type healthResponse struct {
 	Status        string `json:"status"`
 	SchemaVersion int    `json:"schemaVersion"`
 	Revision      uint64 `json:"revision"`
+	WriteEnabled  bool   `json:"writeEnabled"`
+	SSEEnabled    bool   `json:"sseEnabled"`
 }
 
 type revisionResponse struct {
@@ -36,6 +38,32 @@ type groupResponse struct {
 	Group    *model.Group `json:"group"`
 }
 
+type groupMembersResponse struct {
+	Revision uint64                    `json:"revision"`
+	Group    string                    `json:"group"`
+	Members  []manager.GroupMemberInfo `json:"members"`
+}
+
+type tracksResponse struct {
+	Revision uint64         `json:"revision"`
+	Tracks   []*model.Track `json:"tracks"`
+}
+
+type trackResponse struct {
+	Revision uint64       `json:"revision"`
+	Track    *model.Track `json:"track"`
+}
+
+type logsResponse struct {
+	Revision uint64           `json:"revision"`
+	Logs     []model.LogEntry `json:"logs"`
+}
+
+type reloadResponse struct {
+	Revision uint64 `json:"revision"`
+	Reloaded bool   `json:"reloaded"`
+}
+
 type checkRequest struct {
 	UUID       string            `json:"uuid"`
 	Permission string            `json:"permission"`
@@ -46,6 +74,173 @@ type checkResponse struct {
 	Value    string `json:"value"`
 	Source   string `json:"source"`
 	Revision uint64 `json:"revision"`
+}
+
+type playersBatchRequest struct {
+	UUIDs    []string          `json:"uuids"`
+	Contexts map[string]string `json:"contexts,omitempty"`
+}
+
+type playersBatchResponse struct {
+	SchemaVersion int                         `json:"schemaVersion"`
+	Revision      uint64                      `json:"revision"`
+	Players       map[string]snapshotResponse `json:"players"`
+}
+
+type userSummaryDTO struct {
+	UUID         string              `json:"uuid"`
+	Username     string              `json:"username"`
+	PrimaryGroup string              `json:"primaryGroup"`
+	Parents      []model.Inheritance `json:"parents,omitempty"`
+	NodeCount    int                 `json:"nodeCount"`
+}
+
+type usersResponse struct {
+	Revision uint64           `json:"revision"`
+	Total    int              `json:"total"`
+	Limit    int              `json:"limit"`
+	Offset   int              `json:"offset"`
+	Users    []userSummaryDTO `json:"users"`
+}
+
+type userRecordResponse struct {
+	Revision uint64      `json:"revision"`
+	User     *model.User `json:"user"`
+}
+
+type ensureUserRequest struct {
+	UUID          string `json:"uuid"`
+	Username      string `json:"username"`
+	PrimaryGroup  string `json:"primaryGroup"`
+	CreateOffline bool   `json:"createOffline"`
+}
+
+type ensureUserResponse struct {
+	Revision uint64      `json:"revision"`
+	Created  bool        `json:"created"`
+	User     *model.User `json:"user"`
+}
+
+type deleteUserResponse struct {
+	Revision uint64 `json:"revision"`
+	Deleted  bool   `json:"deleted"`
+	UUID     string `json:"uuid"`
+}
+
+type deleteGroupResponse struct {
+	Revision uint64 `json:"revision"`
+	Deleted  bool   `json:"deleted"`
+	Group    string `json:"group"`
+}
+
+type deleteTrackResponse struct {
+	Revision uint64 `json:"revision"`
+	Deleted  bool   `json:"deleted"`
+	Track    string `json:"track"`
+}
+
+type setParentRequest struct {
+	Group           string            `json:"group"`
+	Mode            string            `json:"mode"`
+	DurationSeconds int64             `json:"durationSeconds"`
+	Expiry          int64             `json:"expiry"`
+	Contexts        map[string]string `json:"contexts"`
+	SetPrimary      bool              `json:"setPrimary"`
+}
+
+type deleteParentRequest struct {
+	Group    string            `json:"group"`
+	Contexts map[string]string `json:"contexts"`
+}
+
+type setPrimaryGroupRequest struct {
+	Group string `json:"group"`
+}
+
+type setPermissionRequest struct {
+	Key             string            `json:"key"`
+	Value           *bool             `json:"value"`
+	DurationSeconds int64             `json:"durationSeconds"`
+	Expiry          int64             `json:"expiry"`
+	Contexts        map[string]string `json:"contexts"`
+}
+
+type deletePermissionRequest struct {
+	Key      string            `json:"key"`
+	Contexts map[string]string `json:"contexts"`
+}
+
+type setMetaRequest struct {
+	Value string `json:"value"`
+}
+
+type setAffixRequest struct {
+	Priority        int               `json:"priority"`
+	Value           string            `json:"value"`
+	DurationSeconds int64             `json:"durationSeconds"`
+	Expiry          int64             `json:"expiry"`
+	Contexts        map[string]string `json:"contexts"`
+}
+
+type deleteAffixRequest struct {
+	Priority *int `json:"priority"`
+}
+
+type trackActionRequest struct {
+	Track string `json:"track"`
+}
+
+type trackActionResponse struct {
+	Revision  uint64      `json:"revision"`
+	FromGroup string      `json:"fromGroup"`
+	ToGroup   string      `json:"toGroup"`
+	User      *model.User `json:"user"`
+}
+
+type clearUserRequest struct {
+	Scope string `json:"scope"`
+}
+
+type batchUserOperation struct {
+	Op              string            `json:"op"`
+	Group           string            `json:"group"`
+	Key             string            `json:"key"`
+	Value           json.RawMessage   `json:"value"`
+	Priority        *int              `json:"priority"`
+	DurationSeconds int64             `json:"durationSeconds"`
+	Expiry          int64             `json:"expiry"`
+	Contexts        map[string]string `json:"contexts"`
+	SetPrimary      bool              `json:"setPrimary"`
+}
+
+type batchUserRequest struct {
+	Operations []batchUserOperation `json:"operations"`
+}
+
+type batchUserResponse struct {
+	Revision uint64      `json:"revision"`
+	Applied  int         `json:"applied"`
+	User     *model.User `json:"user"`
+}
+
+type createGroupRequest struct {
+	Name        string `json:"name"`
+	Weight      int    `json:"weight"`
+	DisplayName string `json:"displayName"`
+}
+
+type patchGroupRequest struct {
+	Weight      *int    `json:"weight"`
+	DisplayName *string `json:"displayName"`
+}
+
+type createTrackRequest struct {
+	Name   string   `json:"name"`
+	Groups []string `json:"groups"`
+}
+
+type putTrackRequest struct {
+	Groups []string `json:"groups"`
 }
 
 type snapshotResponse struct {

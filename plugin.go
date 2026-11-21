@@ -27,6 +27,45 @@ func GetManager() *manager.Manager {
 	return globalManager.Load()
 }
 
+func buildAPIOptions(cfg *Config, log logr.Logger) (api.Options, error) {
+	readTokens, err := api.LoadTokens(cfg.APIToken, cfg.APITokenFile, "STONYPERMS_API_TOKEN")
+	if err != nil {
+		return api.Options{}, err
+	}
+
+	writeEnabled := cfg.APIWriteEnabled
+	var writeTokens []string
+	if writeEnabled {
+		wt, writeErr := api.LoadTokens(cfg.APIWriteToken, cfg.APIWriteTokenFile, "STONYPERMS_API_WRITE_TOKEN")
+		if writeErr != nil {
+			// Fail closed: never fall back to read tokens when write token loading fails.
+			log.Error(writeErr, "StonyPerms HTTP write endpoints disabled; failed to load write token")
+			writeEnabled = false
+		} else {
+			writeTokens = wt
+		}
+	}
+
+	return api.Options{
+		Listen:               cfg.APIListen,
+		Tokens:               readTokens,
+		WriteEnabled:         writeEnabled,
+		WriteTokens:          writeTokens,
+		RateLimitPerSec:      cfg.APIRateLimitPerSec,
+		RateLimitBurst:       cfg.APIRateLimitBurst,
+		WriteRateLimitPerSec: cfg.APIWriteRateLimitPerSec,
+		WriteRateLimitBurst:  cfg.APIWriteRateLimitBurst,
+		SSEEnabled:           cfg.APISSEEnabled,
+		SSEMaxClients:        cfg.APISSEMaxClients,
+		AllowRemote:          cfg.APIAllowRemote,
+		TLSCertFile:          cfg.APITLSCert,
+		TLSKeyFile:           cfg.APITLSKey,
+		SnapshotTTL:          time.Duration(cfg.APISnapshotTTLSeconds) * time.Second,
+		DefaultGroup:         cfg.DefaultGroup,
+		Logger:               log,
+	}, nil
+}
+
 // Plugin is the primary Gate proxy plugin entrypoint for StonyPerms.
 var Plugin = proxy.Plugin{
 	Name: "StonyPerms",
@@ -37,14 +76,7 @@ var Plugin = proxy.Plugin{
 		cfg, err := LoadConfig(configPath)
 		if err != nil {
 			log.Error(err, "Failed to load stonyperms.toml, using defaults")
-			cfg = &Config{
-				DefaultGroup:         "default",
-				StorageType:          "json",
-				StorageDir:           "config/stonyperms",
-				ApplyGatePermissions: true,
-				ApplyServerContexts:  true,
-				EnableAuditLog:       true,
-			}
+			cfg = defaultConfig()
 		}
 
 		store, err := storage.NewJSONStorage(cfg.StorageDir)
@@ -58,24 +90,15 @@ var Plugin = proxy.Plugin{
 		}
 		globalManager.Store(mgr)
 
-		// Start the optional read-only HTTP API used by backend adapters.
-		// A configuration error disables the API but never prevents Gate
-		// from starting with local permission enforcement intact.
+		// Start the optional HTTP API used by backend adapters and integrations.
+		// A configuration error disables the API (or write tier) without
+		// preventing Gate from starting with local permission enforcement intact.
 		if cfg.APIEnabled {
-			token, tokenErr := api.LoadToken(cfg.APIToken, cfg.APITokenFile)
+			apiOpts, tokenErr := buildAPIOptions(cfg, log)
 			if tokenErr != nil {
 				log.Error(tokenErr, "StonyPerms HTTP API not started")
 			} else {
-				apiServer, apiErr := api.New(mgr, api.Options{
-					Listen:       cfg.APIListen,
-					Token:        token,
-					AllowRemote:  cfg.APIAllowRemote,
-					TLSCertFile:  cfg.APITLSCert,
-					TLSKeyFile:   cfg.APITLSKey,
-					SnapshotTTL:  time.Duration(cfg.APISnapshotTTLSeconds) * time.Second,
-					DefaultGroup: cfg.DefaultGroup,
-					Logger:       log,
-				})
+				apiServer, apiErr := api.New(mgr, apiOpts)
 				if apiErr != nil {
 					log.Error(apiErr, "StonyPerms HTTP API not started")
 				} else if startErr := apiServer.Start(ctx); startErr != nil {
