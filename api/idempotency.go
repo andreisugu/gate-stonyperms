@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -220,13 +221,13 @@ func (s *Server) withIdempotency(next http.Handler) http.Handler {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(rawBody))
 
-		bodyHash := sha256.Sum256(rawBody)
+		bodyHash := requestDigest(r.URL.RawQuery, rawBody)
 		cacheKey := r.Method + " " + r.URL.Path + "\x00" + key
 
 		for {
 			cached, conflict, waitCh, acquired := s.idemp.acquire(cacheKey, bodyHash)
 			if conflict {
-				writeError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was reused with a different request body")
+				writeError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was reused with different request parameters or body")
 				return
 			}
 			if cached != nil {
@@ -264,4 +265,18 @@ func (s *Server) withIdempotency(next http.Handler) http.Handler {
 			return
 		}
 	})
+}
+
+func requestDigest(rawQuery string, rawBody []byte) [sha256.Size]byte {
+	canonicalQuery := rawQuery
+	if parsed, err := url.ParseQuery(rawQuery); err == nil {
+		canonicalQuery = parsed.Encode()
+	}
+	h := sha256.New()
+	_, _ = h.Write([]byte(canonicalQuery))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(rawBody)
+	var sum [sha256.Size]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
 }
