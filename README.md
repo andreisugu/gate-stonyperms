@@ -1,66 +1,164 @@
-# 💎 StonyPerms (`gate-stonyperms`)
+<div align="center">
 
-> **Lightning-fast, ultra-deep LuckPerms-style permissions management engine for Minekube Gate Minecraft proxy.**
+# 💎 Gate StonyPerms
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Go Report Card](https://goreportcard.com/badge/github.com/andreisugu/gate-stonyperms)](https://goreportcard.com/report/github.com/andreisugu/gate-stonyperms)
-[![Platform](https://img.shields.io/badge/Platform-Gate%20Proxy-brightgreen.svg)](https://github.com/minekube/gate)
+**Lightning-fast, LuckPerms-compatible permissions engine & cross-server HTTP + SSE platform for Minekube Gate.**
 
----
+<p>
+  <a href="https://github.com/andreisugu/gate-stonyperms/actions/workflows/ci.yml"><img src="https://github.com/andreisugu/gate-stonyperms/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://pkg.go.dev/github.com/andreisugu/gate-stonyperms"><img src="https://pkg.go.dev/badge/github.com/andreisugu/gate-stonyperms.svg" alt="Go Reference" /></a>
+  <img src="https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.26" />
+  <a href="https://github.com/minekube/gate"><img src="https://img.shields.io/badge/Platform-Minekube_Gate-7c3aed?style=flat-square" alt="Minekube Gate" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=flat-square" alt="Apache 2.0" /></a>
+</p>
 
-## ⚡ Overview
+<p>
+  <a href="#-key-features">Features</a> •
+  <a href="#-installation">Installation</a> •
+  <a href="#-http-api-v02--live-sse">HTTP API v0.2</a> •
+  <a href="#-configuration">Configuration</a> •
+  <a href="#-commands">Commands</a> •
+  <a href="#-minekube-gate-extensions-suite">Gate Suite</a>
+</p>
 
-**StonyPerms** brings the power, flexibility, and intuitive command structure of **LuckPerms** to the **Minekube Gate proxy** ecosystem. It is built from the ground up in Go following [A Philosophy of Software Design](https://github.com/johnousterhout/aposd) and [The Pragmatic Programmer](https://pragprog.com) principles: deep modular architecture, atomic persistence, zero-allocation permission checks, dynamic context resolution, and full Brigodier auto-completions.
-
-### 🌟 Key Features
-
-* 🚀 **LuckPerms Command Compatibility**: Full `/sp` / `/stonyperms` command suite mirroring `/lp` syntax.
-* 🌳 **Tree & Wildcard Resolution**: Supports exact nodes (`gate.command.server`), sub-wildcards (`gate.command.*`, `gate.*`), universal wildcards (`*`), and explicit denials (`false`).
-* ⏳ **Temporary Permissions & Inheritances**: Time-limited permissions and group memberships with auto-expiration (`10m`, `2h`, `7d`, `30d`, `1y`).
-* 🌐 **Dynamic Contexts**: Context-aware permissions (e.g. `server=lobby`, `world=hub`). Gate automatically passes the player's active backend server into the evaluation engine.
-* 🛡️ **Weighted Group Inheritance**: Groups resolve in strict weight order (higher weight overrides lower weight). Infinite circular inheritance protection.
-* 🎖️ **Promotion Tracks**: Configurable rank tracks (`default -> vip -> mod -> admin`) with `/sp user <user> promote <track>` and `demote`.
-* 🎨 **Prefixes, Suffixes & Metadata**: Weighted prefix/suffix resolution and arbitrary custom metadata key-values.
-* 📜 **Audit History Log**: Built-in action audit log tracking administrative changes (`/sp log recent`, `/sp log userhistory`).
-* 🔍 **Live Verbose Diagnostic Engine**: Real-time permission check tracing to console or chat (`/sp verbose on`).
-* 💾 **Atomic JSON Storage**: Zero-dependency, crash-resilient atomic file persistence in `config/stonyperms/`.
+</div>
 
 ---
 
-## ⌨️ Command Aliases
+## ✨ Key Features
 
-All commands can be executed using any of these aliases:
-* `/sp` *(primary)*
-* `/stonyperms`
-* `/spb` *(BungeeCord style)*
-* `/spv` *(Velocity style)*
-* `/perm`
-* `/perms`
+- **LuckPerms-Style CLI (`/sp`):** Familiar `user`, `group`, `track`, `check`, `verbose`, and `log` trees with Brigadier auto-completion.
+- **Exact + Wildcard + Explicit Deny Evaluation:** Supports exact nodes (`gate.command.server`), sub-wildcards (`gate.command.*`, `*`), explicit `false` denials, and circular inheritance protection.
+- **Dynamic Contexts & Temporary Grants:** Per-server/world contexts (`server=lobby`) and expiring permissions, parent memberships, prefixes, and suffixes (`10m`, `2h`, `7d`, `30d`, `1y`).
+- **Weighted Inheritance, Tracks & Affixes:** Groups resolve in descending weight order alongside promotion tracks, priority-ordered prefixes/suffixes, and metadata keys.
+- **v0.2 Scoped HTTP API & Live SSE Stream:** Opt-in cross-server synchronization (`GET /v1/events` SSE invalidation, `ETag` snapshots, batch queries, idempotent audited writes, and multi-token rotation) for Paper, Fabric, web stores, and stats services.
+- **Atomic Persistence & Live Verbose:** Crash-safe atomic JSON storage under `config/stonyperms/` and real-time permission decision tracing (`/sp verbose on`).
 
 ---
 
-## 📖 Command Reference
+## 📦 Installation
 
-### 🛠️ General Commands
+### Using `gate-plugin-builder` / Pelican Egg
+Add to your `plugins.txt` or `GATE_PLUGINS`:
+```text
+github.com/andreisugu/gate-stonyperms
+```
+
+### In Go Code
+```bash
+go get github.com/andreisugu/gate-stonyperms
+```
+
+```go
+package main
+
+import (
+	"go.minekube.com/gate/cmd/gate"
+	"go.minekube.com/gate/pkg/edition/java/proxy"
+
+	stonyperms "github.com/andreisugu/gate-stonyperms"
+)
+
+func main() {
+	proxy.Plugins = append(proxy.Plugins, stonyperms.Plugin)
+	gate.Execute()
+}
+```
+
+> Enable `requireBuiltinCommandPermissions: true` in Gate's `config.yml` so built-in proxy commands (`/server`, `/send`, `/glist`) obey StonyPerms nodes.
+
+---
+
+## 🌉 HTTP API v0.2 & Live SSE
+
+StonyPerms exposes an optional, tailnet/TLS-ready JSON + Server-Sent Events API so backend adapters ([`andreisugu/stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge)), web stores, and stats pipelines keep Gate as their **single source of truth**:
+
+- **Dual-Tier Scoped Bearer Auth:** Separate read tokens (`api_token_file` / `STONYPERMS_API_TOKEN`) and opt-in write/admin tokens (`api_write_enabled = false` by default, `api_write_token_file` / `STONYPERMS_API_WRITE_TOKEN`). Startup refuses overlapping tokens; read tokens return `403 insufficient_scope` on write or `/v1/logs` routes.
+- **Zero-Downtime Rotation & Rate Limits:** Up to 4 newline-separated tokens per tier (`#` comments ignored) and per-IP token-bucket limits (`60 req/s` burst `120` read; `15 req/s` burst `30` write).
+- **Live SSE Invalidation (`GET /v1/events`):** Sub-second `ChangeEvent` push (`user_updated`, `group_updated`, `track_updated`, `reload`, `expiry_cleanup`) with `25s` keepalives alongside `ETag` snapshot caching.
+- **Batch, Store & Audited Mutations (`X-StonyPerms-Actor`, `Idempotency-Key`):** `POST /v1/players/batch` (up to 100 UUIDs), `GET /v1/users/by-name/{username}`, `accumulate` donor time stacking, atomic `/v1/users/{id}/batch` transactions (up to 32 ops), Group/Track CRUD, and canonicalized query+body idempotency (`409 idempotency_conflict` on mismatch).
+
+```toml
+# Optional HTTP API & SSE (config/stonyperms.toml)
+api_enabled = true
+api_listen = "127.0.0.1:8737"
+api_token_file = "config/stonyperms-api.token"
+api_sse_enabled = true
+
+# Opt-in write tier (keep false unless trusted store/bridge writers need remote mutations)
+api_write_enabled = false
+# api_write_token_file = "config/stonyperms-api-write.token"
+```
+
+Read the complete contract, endpoints, security rules, and token generation steps in [`docs/http-api.md`](docs/http-api.md).
+
+---
+
+## ⚙️ Configuration
+
+Generated at `config/stonyperms.toml`:
+
+```toml
+default_group = "default"
+storage_type = "json"
+storage_dir = "config/stonyperms"
+apply_gate_permissions = true
+apply_server_contexts = true
+enable_audit_log = true
+
+api_enabled = false
+api_listen = "127.0.0.1:8737"
+api_token_file = "config/stonyperms-api.token"
+api_allow_remote = false
+api_tls_cert = ""
+api_tls_key = ""
+api_snapshot_ttl_seconds = 30
+
+api_write_enabled = false
+api_write_token_file = ""
+api_rate_limit_per_sec = 60
+api_rate_limit_burst = 120
+api_write_rate_limit_per_sec = 15
+api_write_rate_limit_burst = 30
+api_sse_enabled = true
+api_sse_max_clients = 32
+```
+
+---
+
+## ⌨️ Commands
+
+**Aliases:** `/sp`, `/stonyperms`, `/spb`, `/spv`, `/perm`, `/perms`
+
+### General Commands
 
 | Command | Description |
 | :--- | :--- |
-| `/sp` | Display StonyPerms version, status, and quick overview |
-| `/sp info` | View detailed diagnostic statistics (loaded entities, storage health, verbose status) |
-| `/sp sync` / `/sp reload` | Hot-reload all permissions data from disk |
-| `/sp check <user> <permission> [context]` | Evaluate a permission for a user and print the full decision trace |
-| `/sp verbose <on \| off \| record> [filter]` | Stream live permission checks to chat/console with source tracing |
+| `/sp info` | Show loaded counts, storage status, and verbose state |
+| `/sp sync` / `/sp reload` | Hot-reload permissions data from disk |
+| `/sp check <user> <permission> [context...]` | Trace an evaluated permission check |
+| `/sp verbose <on \| off \| record> [filter]` | Stream live permission checks to chat/console |
 | `/sp creategroup <group> [weight] [displayName]` | Create a new permission group |
 | `/sp deletegroup <group>` | Delete an existing group |
 | `/sp listgroups` | List all groups ordered by weight |
 | `/sp createtrack <track>` | Create a new promotion track |
 | `/sp deletetrack <track>` | Delete a promotion track |
-| `/sp listtracks` | List all configured promotion tracks and their paths |
+| `/sp listtracks` | List all configured promotion tracks |
 
----
+### Quick Examples
 
-### 👤 User Commands (`/sp user <user> ...`)
+```text
+/sp user Steve parent add admin
+/sp user Alex parent addtemp vip 7d
+/sp group default permission set gate.command.server true server=lobby
+/sp group moderator meta setprefix 50 "&9[Mod] "
+/sp user Steve promote ranks
+```
 
+<details>
+<summary><strong>Full User, Group, Track & Audit Log CLI Reference</strong></summary>
+
+#### User (`/sp user <user> ...`)
 ```text
 /sp user <user> info
 /sp user <user> permission set <node> [true/false] [context...]
@@ -94,10 +192,7 @@ All commands can be executed using any of these aliases:
 /sp user <user> clear
 ```
 
----
-
-### 👥 Group Commands (`/sp group <group> ...`)
-
+#### Group (`/sp group <group> ...`)
 ```text
 /sp group <group> info
 /sp group <group> setweight <weight>
@@ -108,190 +203,51 @@ All commands can be executed using any of these aliases:
 /sp group <group> showtracks
 /sp group <group> clear
 
-/sp group <group> permission set <node> [true/false] [context...]
-/sp group <group> permission unset <node> [context...]
-/sp group <group> permission settemp <node> <true/false> <duration> [context...]
-/sp group <group> permission unsettemp <node> [context...]
-/sp group <group> permission check <node>
-/sp group <group> permission clear
-
-/sp group <group> parent info
-/sp group <group> parent add <group> [context...]
-/sp group <group> parent set <group> [context...]
-/sp group <group> parent remove <group> [context...]
-/sp group <group> parent addtemp <group> <duration> [context...]
-/sp group <group> parent clear
-
-/sp group <group> meta info
-/sp group <group> meta set <key> <value>
-/sp group <group> meta unset <key>
-/sp group <group> meta setprefix [priority] <prefix>
-/sp group <group> meta setsuffix [priority] <suffix>
-/sp group <group> meta removeprefix <priority>
-/sp group <group> meta removesuffix <priority>
-/sp group <group> meta clear
+/sp group <group> permission <set|unset|settemp|unsettemp|check|clear> ...
+/sp group <group> parent <info|add|set|remove|addtemp|clear> ...
+/sp group <group> meta <info|set|unset|setprefix|setsuffix|removeprefix|removesuffix|clear> ...
 ```
 
----
-
-### 🛤️ Track Commands (`/sp track <track> ...`)
-
+#### Tracks & Audit Log
 ```text
-/sp track <track> info
-/sp track <track> append <group>
-/sp track <track> insert <group> <position>
-/sp track <track> remove <group>
-/sp track <track> rename <newName>
-/sp track <track> clear
+/sp track <track> <info|append|insert|remove|rename|clear> ...
+/sp log <recent|search|userhistory|grouphistory|trackhistory> ...
 ```
+
+</details>
 
 ---
 
-### 📜 Audit Log Commands (`/sp log ...`)
-
-```text
-/sp log recent [page]
-/sp log search <query> [page]
-/sp log userhistory <user> [page]
-/sp log grouphistory <group> [page]
-/sp log trackhistory <track> [page]
-```
-
----
-
-## 💡 Practical Examples
-
-#### 1. Giving Admin Permissions to a User
-```bash
-/sp user Steve parent add admin
-```
-
-#### 2. Granting a Temporary VIP Rank for 7 Days
-```bash
-/sp user Alex parent addtemp vip 7d
-```
-
-#### 3. Creating a Group with Weight and Display Name
-```bash
-/sp creategroup moderator 50 "&9Moderator"
-/sp group moderator parent add default
-/sp group moderator permission set gate.command.kick true
-/sp group moderator permission set gate.command.send true
-/sp group moderator meta setprefix 50 "&9[Mod] "
-```
-
-#### 4. Setting Per-Server Context Permissions
-```bash
-# Allow /gate server only on the lobby backend server
-/sp group default permission set gate.command.server true server=lobby
-```
-
-#### 5. Creating a Rank Track and Promoting
-```bash
-/sp createtrack ranks
-/sp track ranks append default
-/sp track ranks append vip
-/sp track ranks append moderator
-/sp track ranks append admin
-
-/sp user Steve promote ranks
-```
-
----
-
-## ⚙️ Configuration (`config/stonyperms.toml`)
-
-```toml
-# The default group assigned to newly joined players
-default_group = "default"
-
-# Storage method to persist permissions data ("json")
-storage_type = "json"
-
-# Directory where permissions, users, groups, tracks, and logs are stored
-storage_dir = "config/stonyperms"
-
-# Automatically hook Gate's internal permission checks (/server, /send, etc.)
-apply_gate_permissions = true
-
-# Track player connected backend server as context (server=<name>)
-apply_server_contexts = true
-
-# Enable audit logging for administrative actions
-enable_audit_log = true
-```
-
----
-
-## 🔌 Developer API (For Other Gate Plugins)
-
-StonyPerms exposes a public global manager for third-party Gate plugins:
+## 🔌 Go Plugin API
 
 ```go
-import (
-    "github.com/andreisugu/gate-stonyperms"
-)
-
-func CheckPlayer(player proxy.Player) {
-    mgr := stonyperms.GetManager()
-    if mgr == nil {
-        return
-    }
-
+if mgr := stonyperms.GetManager(); mgr != nil {
     user := mgr.GetUser(player.ID())
     if mgr.HasPermission(user, "myplugin.special", map[string]string{"server": "lobby"}) {
-        // Player has permission
+        // Allowed
     }
-
     prefix := mgr.GetPrefix(user, nil)
-    // Use prefix in chat or tablist
 }
 ```
 
 ---
 
-## 🌉 Read-only HTTP Bridge API
+## 🌐 Minekube Gate Extensions Suite
 
-StonyPerms can expose a read-only JSON API for Paper and Fabric permission
-adapters, so backends can use the proxy as their source of truth without
-sharing storage or reimplementing inheritance.
-
-```toml
-api_enabled = true
-api_listen = "127.0.0.1:8737"
-api_token_file = "config/stonyperms-api.token"
-api_snapshot_ttl_seconds = 30
-```
-
-The API is disabled by default, binds to loopback, requires a bearer token,
-and never mutates data. See [`docs/http-api.md`](docs/http-api.md) for the
-contract, security model, and examples. The consumer implementation lives at
-[`andreisugu/stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge).
-
-## 📦 Bundling with Gate
-
-Add `github.com/andreisugu/gate-stonyperms` to your `plugins.txt` or bundle in `main.go`:
-
-```go
-package main
-
-import (
-    "go.minekube.com/gate/cmd/gate"
-    "go.minekube.com/gate/pkg/edition/java/proxy"
-
-    stonyperms "github.com/andreisugu/gate-stonyperms"
-)
-
-func main() {
-    proxy.Plugins = append(proxy.Plugins,
-        stonyperms.Plugin,
-    )
-    gate.Execute()
-}
-```
+| Project | Role | Stack |
+| :--- | :--- | :--- |
+| **[`gate-stonyperms`](https://github.com/andreisugu/gate-stonyperms)** *(this repo)* | LuckPerms-style permissions, contexts, tracks & v0.2 R/W HTTP + SSE API | `Go 1.26` |
+| [`stonyperms-bridge`](https://github.com/andreisugu/stonyperms-bridge) | Paper & Fabric permission adapters, live SSE, `/spb` commands, Vault & PAPI | `Java 25` |
+| [`gate-bettertab`](https://github.com/andreisugu/gate-bettertab) | Animated RGB / MiniMessage TAB lists, server groups, weights & placeholders | `Go 1.26` |
+| [`gate-discord4gate`](https://github.com/andreisugu/gate-discord4gate) | Bidirectional Discord <> Minecraft chat, slash commands & webhook avatars | `Go 1.26` |
+| [`gate-hybridforwarding`](https://github.com/andreisugu/gate-hybridforwarding) | Per-backend Velocity Modern, Legacy BungeeCord, BungeeGuard & None forwarding | `Go 1.26` |
+| [`gate-simplewhitelist`](https://github.com/andreisugu/gate-simplewhitelist) | Lock-free `atomic.Pointer` whitelist by username, UUID, IP & CIDR | `Go 1.26` |
+| [`gate-skinschanger`](https://github.com/andreisugu/gate-skinschanger) | Resilient multi-provider & Mineskin URL skin switcher with live backend refresh | `Go 1.26` |
+| [`gate-smartlimbo`](https://github.com/andreisugu/gate-smartlimbo) | Limbo failover, protected sandbox & batched backend auto-reconnect queues | `Go 1.26` |
+| [`gate-plugin-builder`](https://github.com/andreisugu/gate-plugin-builder) | Zero-config static Gate bundler (`build.sh`) + Pelican / Pterodactyl egg | `Shell` |
 
 ---
 
 ## 📄 License
 
-Licensed under the **Apache License, Version 2.0**. See [`LICENSE`](LICENSE) for details.
+Licensed under the [Apache License 2.0](LICENSE) © Andrei.
