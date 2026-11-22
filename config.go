@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 
@@ -16,6 +17,9 @@ const defaultConfigTemplate = `# ===============================================
 #                              StonyPerms
 #         High-Performance Permissions Engine for Gate Minecraft Proxy
 # =============================================================================
+
+# Schema version. StonyPerms backs up and upgrades older configs on startup.
+config_version = 4
 
 # The default group assigned to newly joined players if no group is assigned.
 default_group = "default"
@@ -137,7 +141,13 @@ type DatabaseConfig struct {
 }
 
 // Config represents the top-level StonyPerms configuration.
+// CurrentConfigVersion is bumped whenever new keys/sections need migration.
+const CurrentConfigVersion = 4
+
 type Config struct {
+	ConfigVersion           int            `toml:"config_version"`
+	MigratedFrom            int            `toml:"-"`
+	MigrationBackup         string         `toml:"-"`
 	DefaultGroup            string         `toml:"default_group"`
 	PrimaryGroupCalculation string         `toml:"primary_group_calculation"`
 	StorageType             string         `toml:"storage_type"`
@@ -179,6 +189,7 @@ type Config struct {
 
 func defaultConfig() *Config {
 	return &Config{
+		ConfigVersion:           CurrentConfigVersion,
 		DefaultGroup:            "default",
 		PrimaryGroupCalculation: "stored",
 		StorageType:             "json",
@@ -223,7 +234,34 @@ func LoadConfig(filePath string) (*Config, error) {
 		return nil, err
 	}
 
+	cfg, err := decodeConfig(data)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ConfigVersion < CurrentConfigVersion {
+		oldVersion := cfg.ConfigVersion
+		backup, migrateErr := migrateConfigFile(filePath, oldVersion)
+		if migrateErr != nil {
+			return nil, migrateErr
+		}
+		data, err = os.ReadFile(filePath)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err = decodeConfig(data)
+		if err != nil {
+			return nil, err
+		}
+		cfg.MigratedFrom = oldVersion
+		cfg.MigrationBackup = backup
+	}
+	return cfg, nil
+}
+
+func decodeConfig(data []byte) (*Config, error) {
 	cfg := defaultConfig()
+	// Missing config_version must read as 0 so old files trigger migration.
+	cfg.ConfigVersion = 0
 	if err := toml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
@@ -248,8 +286,110 @@ func LoadConfig(filePath string) (*Config, error) {
 	if err := storage.ValidateTablePrefix(cfg.Database.TablePrefix); err != nil {
 		return nil, err
 	}
-
 	return cfg, nil
+}
+
+// migrateConfigFile backs up an older config and appends missing keys without
+// rewriting existing values or comments. It returns the backup path.
+func migrateConfigFile(filePath string, oldVersion int) (string, error) {
+	raw, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", err
+	}
+	backup := fmt.Sprintf("%s.bak-v%d-%s", filePath, oldVersion, time.Now().UTC().Format("20060102-150405"))
+	if err := os.WriteFile(backup, raw, 0o600); err != nil {
+		return "", err
+	}
+
+	text := string(raw)
+	var leading []string
+	addKey := func(key, line string) {
+		if !hasTopLevelConfigKey(text, key) {
+			leading = append(leading, line)
+		}
+	}
+	addKey("config_version", fmt.Sprintf("config_version = %d", CurrentConfigVersion))
+	addKey("primary_group_calculation", `primary_group_calculation = "stored"`)
+	addKey("api_editor_public_url", `api_editor_public_url = ""`)
+	addKey("prefix_stacking", "prefix_stacking = false")
+	addKey("prefix_start_spacer", `prefix_start_spacer = ""`)
+	addKey("prefix_middle_spacer", `prefix_middle_spacer = ""`)
+	addKey("prefix_end_spacer", `prefix_end_spacer = ""`)
+	addKey("suffix_stacking", "suffix_stacking = false")
+	addKey("suffix_start_spacer", `suffix_start_spacer = ""`)
+	addKey("suffix_middle_spacer", `suffix_middle_spacer = ""`)
+	addKey("suffix_end_spacer", `suffix_end_spacer = ""`)
+	addKey("stack_deduplicate", "stack_deduplicate = true")
+
+	// Keep the existing version line in sync when it is already present.
+	if hasTopLevelConfigKey(text, "config_version") {
+		text = replaceTopLevelConfigLine(text, "config_version", fmt.Sprintf("config_version = %d", CurrentConfigVersion))
+	}
+
+	header := "# --- migrated by StonyPerms (schema v" + fmt.Sprint(CurrentConfigVersion) + ") ---\n"
+	if len(leading) > 0 {
+		text = header + strings.Join(leading, "\n") + "\n\n" + text
+	} else {
+		text = header + text
+	}
+	if !strings.Contains(text, "[database]") {
+		text = strings.TrimRight(text, "\n") + `
+
+# Relational SQL backends (used when storage_type is sqlite/mysql/mariadb/postgresql).
+[database]
+file = ""
+host = "127.0.0.1"
+port = 0
+database = "stonyperms"
+username = "stonyperms"
+password = ""
+password_file = ""
+table_prefix = "stonyperms_"
+ssl_mode = "prefer"
+max_open_conns = 10
+max_idle_conns = 5
+conn_max_lifetime_seconds = 1800
+connect_timeout_seconds = 5
+`
+	}
+
+	tmp := filePath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(text), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, filePath); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return backup, nil
+}
+
+func hasTopLevelConfigKey(text, key string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			return false
+		}
+		if strings.HasPrefix(trimmed, key+" ") || strings.HasPrefix(trimmed, key+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+func replaceTopLevelConfigLine(text, key, replacement string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			break
+		}
+		if strings.HasPrefix(trimmed, key+" ") || strings.HasPrefix(trimmed, key+"=") {
+			lines[i] = replacement
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func normalizeEditorPublicURL(raw string) (string, error) {

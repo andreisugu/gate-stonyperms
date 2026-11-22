@@ -38,6 +38,8 @@ type Manager struct {
 	tracks           map[string]*model.Track
 	logs             []model.LogEntry
 	updateListener   atomic.Pointer[func()]
+	changeNotifier   atomic.Pointer[func(EditorChangeNotice)]
+	logNotifyMuted   map[string]bool
 	subMu            sync.Mutex
 	subscribers      map[uint64]*eventSubscriber
 	nextSubID        uint64
@@ -46,6 +48,7 @@ type Manager struct {
 	revision         atomic.Uint64
 	generation       string
 	exportDir        string
+	importDir        string
 	defaultGroup     string
 	auditLogDisabled bool
 }
@@ -148,9 +151,11 @@ func New(store storage.StorageProvider) (*Manager, error) {
 		tracks:       make(map[string]*model.Track),
 		logs:         make([]model.LogEntry, 0),
 		subscribers:  make(map[uint64]*eventSubscriber),
+		logNotifyMuted: make(map[string]bool),
 		stopChan:     make(chan struct{}),
 		generation:   newGeneration(),
 		exportDir:    deriveExportDir(store),
+		importDir:    deriveImportDir(store),
 		defaultGroup: "default",
 	}
 	m.revision.Store(1)

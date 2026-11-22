@@ -8,6 +8,7 @@
     apiBase: '',
     sessionToken: '',
     editor: null,
+    baseline: null,
     selected: null, // { type: 'group'|'user', id: string }
     expandedSections: { tracks: true, groups: true, users: true },
     expandedTracks: {},
@@ -248,7 +249,7 @@
     return arr;
   }
 
-  async function encodePortableSp1(payloadObj) {
+  async function encodePortableSp1(payloadObj, prefix = 'sp1_') {
     const rawBytes = new TextEncoder().encode(JSON.stringify(payloadObj));
     if (typeof CompressionStream === 'undefined') {
       throw new Error('Browser lacks CompressionStream(gzip); use JSON export instead.');
@@ -258,12 +259,14 @@
     await writer.write(rawBytes);
     await writer.close();
     const buf = await new Response(cs.readable).arrayBuffer();
-    return 'sp1_' + bytesToBase64Url(new Uint8Array(buf));
+    return prefix + bytesToBase64Url(new Uint8Array(buf));
   }
 
   async function decodePortableSp1(code) {
     const trimmed = String(code || '').trim();
-    if (!trimmed.startsWith('sp1_')) throw new Error('Expected sp1_ portable code');
+    if (!trimmed.startsWith('sp1_') && !trimmed.startsWith('sp2_')) {
+      throw new Error('Expected sp1_ or sp2_ portable code');
+    }
     const compressed = base64UrlToBytes(trimmed.slice(4));
     if (typeof DecompressionStream === 'undefined') {
       throw new Error('Browser lacks DecompressionStream(gzip) to read sp1_ payloads.');
@@ -434,6 +437,7 @@
     data.potentialContexts = data.potentialContexts || { server: ['lobby', 'survival'], world: ['world'] };
 
     STATE.editor = data;
+    STATE.baseline = deepClone(data);
     STATE.mode = mode;
     STATE.apiBase = apiBase;
     STATE.sessionToken = token;
@@ -472,13 +476,46 @@
   }
 
   function buildSavePayload() {
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    const base = STATE.baseline;
+    if (!base) {
+      return {
+        groups: deepClone(STATE.editor.groups),
+        tracks: deepClone(STATE.editor.tracks),
+        users: deepClone(STATE.editor.users),
+        deletedGroups: Array.from(STATE.deletedGroups),
+        deletedTracks: Array.from(STATE.deletedTracks),
+        deletedUsers: Array.from(STATE.deletedUsers),
+        baseRevision: (STATE.editor.metadata && STATE.editor.metadata.revision) || 0,
+        actor: (STATE.editor.metadata && STATE.editor.metadata.actor) || 'StonyPermsWeb'
+      };
+    }
+
+    const baseGroups = new Map((base.groups || []).map(g => [g.name, g]));
+    const baseTracks = new Map((base.tracks || []).map(t => [t.name, t]));
+    const baseUsers = new Map((base.users || []).map(u => [u.uuid, u]));
+
+    const groups = STATE.editor.groups.filter(g => !same(g, baseGroups.get(g.name))).map(g => deepClone(g));
+    const tracks = STATE.editor.tracks.filter(t => !same(t, baseTracks.get(t.name))).map(t => deepClone(t));
+    const users = STATE.editor.users.filter(u => !same(u, baseUsers.get(u.uuid))).map(u => deepClone(u));
+
+    const deletedGroups = new Set(STATE.deletedGroups);
+    const deletedTracks = new Set(STATE.deletedTracks);
+    const deletedUsers = new Set(STATE.deletedUsers);
+    const liveGroupNames = new Set(STATE.editor.groups.map(g => g.name));
+    const liveTrackNames = new Set(STATE.editor.tracks.map(t => t.name));
+    const liveUserIds = new Set(STATE.editor.users.map(u => u.uuid));
+    baseGroups.forEach((_, name) => { if (!liveGroupNames.has(name)) deletedGroups.add(name); });
+    baseTracks.forEach((_, name) => { if (!liveTrackNames.has(name)) deletedTracks.add(name); });
+    baseUsers.forEach((_, id) => { if (!liveUserIds.has(id)) deletedUsers.add(id); });
+
     return {
-      groups: deepClone(STATE.editor.groups),
-      tracks: deepClone(STATE.editor.tracks),
-      users: deepClone(STATE.editor.users),
-      deletedGroups: Array.from(STATE.deletedGroups),
-      deletedTracks: Array.from(STATE.deletedTracks),
-      deletedUsers: Array.from(STATE.deletedUsers),
+      groups,
+      tracks,
+      users,
+      deletedGroups: Array.from(deletedGroups),
+      deletedTracks: Array.from(deletedTracks),
+      deletedUsers: Array.from(deletedUsers),
       baseRevision: (STATE.editor.metadata && STATE.editor.metadata.revision) || 0,
       actor: (STATE.editor.metadata && STATE.editor.metadata.actor) || 'StonyPermsWeb'
     };
@@ -797,7 +834,7 @@
         <div class="target-header">
           <div class="target-title-row">
             <h2>${isGroup ? 'Group:' : 'User:'}</h2>
-            <span class="target-badge">${esc(isGroup ? (entity.displayName || entity.name) : (entity.username || entity.uuid))}</span>
+            <span class="target-badge" title="${esc(isGroup ? (entity.displayName || entity.name) : (entity.username || entity.uuid))}">${renderMcText(isGroup ? (entity.displayName || entity.name) : (entity.username || entity.uuid))}</span>
             ${isGroup
               ? `<span class="target-sub">( ${esc(entity.name)} )</span>`
               : `<img class="user-head" style="width:28px;height:28px" src="https://mc-heads.net/avatar/${esc(entity.uuid || entity.username)}/28" data-name="${esc(entity.username)}" onerror="__spHeadFallback(this)" alt="">`
@@ -892,7 +929,7 @@
                   <div class="node-cell">
                     ${r.inherited ? `<span class="badge-pill type-inherited">INHERITED · ${esc(r.sourceGroup)}</span>` : ''}
                     <span class="badge-pill ${esc(r.cls)}">${esc(r.badge)}</span>
-                    <span class="node-key">${esc(r.key)}</span>
+                    <span class="node-key" title="${esc(r.key)}">${(r.category === 'AFFIX' || r.badge === 'DISPLAY NAME') ? renderMcText(r.key) : esc(r.key)}</span>
                     ${r.extraNote ? `<span class="node-extra-note">${esc(r.extraNote)}</span>` : ''}
                   </div>
                 </td>
@@ -975,7 +1012,7 @@
                   return `
                     <button type="button" class="sidebar-item ${active ? 'active' : ''}" data-select-group="${esc(g.name)}">
                       <div class="sidebar-item-main">
-                        <span class="sidebar-item-title">${esc(g.displayName || g.name)}</span>
+                        <span class="sidebar-item-title" title="${esc(g.displayName || g.name)}">${renderMcText(g.displayName || g.name)}</span>
                         ${g.displayName && g.displayName !== g.name ? `<span class="sidebar-item-sub">(${esc(g.name)})</span>` : ''}
                       </div>
                       <span class="sidebar-item-weight">${esc(g.weight)}</span>
@@ -1379,6 +1416,89 @@
     });
   }
 
+  function contextCatalog() {
+    const pot = (STATE.editor && STATE.editor.potentialContexts) || {};
+    const keys = Object.keys(pot).filter(k => Array.isArray(pot[k])).sort();
+    return { pot, keys };
+  }
+
+  function contextPairDatalist() {
+    const { pot } = contextCatalog();
+    const options = [];
+    Object.entries(pot).forEach(([k, vals]) => {
+      (vals || []).slice(0, 30).forEach(v => options.push(`${k}=${v}`));
+    });
+    if (!options.length) return '';
+    return `<datalist id="ctx-pair-list">${options.map(o => `<option value="${esc(o)}"></option>`).join('')}</datalist>`;
+  }
+
+  function openContextsModal(title, initial, onApply) {
+    const { pot, keys } = contextCatalog();
+    const rows = Object.entries(initial || {}).map(([k, v]) => ({ k, v }));
+    if (!rows.length) rows.push({ k: 'server', v: (pot.server || [])[0] || '' });
+
+    const valueOptions = key => (pot[key] || []).map(v => `<option value="${esc(v)}"></option>`).join('');
+
+    openModal(title, `
+      <datalist id="ctx-key-list">${keys.map(k => `<option value="${esc(k)}"></option>`).join('')}</datalist>
+      <div id="ctx-row-wrap"></div>
+      <button type="button" class="btn btn-secondary btn-sm" id="ctx-add-row">+ Add context</button>
+      <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:4px">
+        ${Object.entries(pot).slice(0, 5).flatMap(([k, vals]) =>
+          (vals || []).slice(0, 4).map(v => `<button type="button" class="preset-chip" data-ctx-pair="${esc(k)}=${esc(v)}">+ ${esc(k)}=${esc(v)}</button>`)
+        ).join('')}
+      </div>
+    `, `<button type="button" class="btn btn-primary btn-sm" id="ctx-apply">Apply Contexts</button>`);
+
+    const draw = () => {
+      const wrap = document.getElementById('ctx-row-wrap');
+      if (!wrap) return;
+      wrap.innerHTML = rows.map((row, idx) => `
+        <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center">
+          <input class="field-input" style="flex:1" list="ctx-key-list" data-ctx-k="${idx}" value="${esc(row.k)}" placeholder="key (server, world, dimension-type, gamemode...)">
+          <input class="field-input" style="flex:1" list="ctx-value-list-${idx}" data-ctx-v="${idx}" value="${esc(row.v)}" placeholder="value">
+          <datalist id="ctx-value-list-${idx}">${valueOptions(row.k)}</datalist>
+          <button type="button" class="row-del-btn" data-ctx-del="${idx}" title="Remove">×</button>
+        </div>
+      `).join('');
+      wrap.querySelectorAll('[data-ctx-k]').forEach(inp => {
+        inp.oninput = () => {
+          const i = Number(inp.dataset.ctxK);
+          rows[i].k = inp.value.trim();
+          const dl = document.getElementById(`ctx-value-list-${i}`);
+          if (dl) dl.innerHTML = valueOptions(rows[i].k);
+        };
+      });
+      wrap.querySelectorAll('[data-ctx-v]').forEach(inp => {
+        inp.oninput = () => { rows[Number(inp.dataset.ctxV)].v = inp.value; };
+      });
+      wrap.querySelectorAll('[data-ctx-del]').forEach(btn => {
+        btn.onclick = () => { rows.splice(Number(btn.dataset.ctxDel), 1); draw(); };
+      });
+    };
+
+    draw();
+    document.getElementById('ctx-add-row').onclick = () => { rows.push({ k: '', v: '' }); draw(); };
+    document.querySelectorAll('[data-ctx-pair]').forEach(btn => {
+      btn.onclick = () => {
+        const pair = btn.dataset.ctxPair;
+        const idx = pair.indexOf('=');
+        if (idx > 0) rows.push({ k: pair.slice(0, idx), v: pair.slice(idx + 1) });
+        draw();
+      };
+    });
+    document.getElementById('ctx-apply').onclick = () => {
+      const out = {};
+      rows.forEach(r => {
+        const k = String(r.k || '').trim().toLowerCase();
+        const v = String(r.v || '').trim();
+        if (k && v) out[k] = v;
+      });
+      onApply(out);
+      closeModal();
+    };
+  }
+
   function openSearchModal() {
     const docs = window.STONYPERMS_WIKI || [];
     const items = [];
@@ -1457,6 +1577,7 @@
         liveResult = json;
         STATE.dirtyCount = 0;
         if (STATE.editor.metadata) STATE.editor.metadata.revision = json.revision;
+        STATE.baseline = deepClone(STATE.editor);
         render();
       } catch (e) {
         liveErr = e.message || String(e);
@@ -1465,37 +1586,83 @@
 
     const applyCode = (liveResult && liveResult.applyCode) || '';
     let portableCode = '';
-    try {
-      portableCode = await encodePortableSp1(payload);
-    } catch {
-      portableCode = '';
+    if (!liveResult) {
+      try {
+        portableCode = await encodePortableSp1(payload, STATE.baseline ? 'sp2_' : 'sp1_');
+      } catch {
+        portableCode = '';
+      }
     }
-    const preferredCode = portableCode || applyCode;
+    const preferredCode = applyCode || portableCode;
     const spCmd = preferredCode ? `/sp applyedits ${preferredCode}` : '';
     const spbCmd = preferredCode ? `/spb applyedits ${preferredCode}` : '';
+    const tooLong = preferredCode.length > 256;
 
     let banner = '';
     if (liveResult) {
       banner = `<div class="val-pill val-true" style="padding:10px 12px;width:100%;justify-content:flex-start">
-        ✔ Saved live to Gate (Revision #${liveResult.revision}: ${liveResult.groupsUpdated} groups updated, ${liveResult.tracksUpdated} tracks, ${liveResult.usersUpdated} users)
+        ✔ Applied live to Gate (Revision #${liveResult.revision}: ${liveResult.groupsUpdated} groups updated, ${liveResult.tracksUpdated} tracks, ${liveResult.usersUpdated} users)
       </div>`;
     } else if (STATE.mode === 'demo') {
       banner = `<div class="val-pill val-undefined" style="padding:10px 12px;width:100%;justify-content:flex-start">
-        Demo Session — Copy the portable command below or export JSON to apply to a real server.
+        Demo Session — Copy the portable code below or export JSON to apply to a real server.
       </div>`;
     } else if (liveErr) {
       banner = `<div class="val-pill val-false" style="padding:10px 12px;width:100%;justify-content:flex-start">
-        Live save failed (${esc(liveErr)}) — use /sp applyedits below as fallback!
+        Live save failed (${esc(liveErr)}) — use the fallback code below.
       </div>`;
     } else {
       banner = `<div class="val-pill val-true" style="padding:10px 12px;width:100%;justify-content:flex-start">
-        Run the command below in Minecraft or Gate console to apply your changes:
+        Run the short command below in Minecraft or Gate console to apply your changes:
       </div>`;
     }
 
+    const diff = (liveResult && Array.isArray(liveResult.diff)) ? liveResult.diff : [];
+    const diffLine = line => {
+      const prefix = String(line).charAt(0);
+      const color = prefix === '+' ? '#7ee787' : prefix === '-' ? '#ff7b72' : '#d29922';
+      return `<div style="font-family:var(--mono);font-size:12px;line-height:1.5;color:${color}">${esc(line)}</div>`;
+    };
+    const diffHtml = diff.length ? `
+      <div class="field-group">
+        <label>Changes Applied (${diff.length})</label>
+        <div style="max-height:220px;overflow:auto;background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;padding:8px 10px">
+          ${diff.map(diffLine).join('')}
+        </div>
+      </div>
+    ` : '';
+
+    const transferHtml = preferredCode ? `
+      <details style="margin-top:6px">
+        <summary style="cursor:pointer;color:var(--text-muted);font-size:12px">Transfer / apply on another server</summary>
+        <div class="field-group" style="margin-top:10px">
+          <label>Gate Command (/sp applyedits)</label>
+          <div style="display:flex;gap:8px">
+            <input type="text" readonly class="field-input" style="font-family:var(--mono)" id="save-sp-cmd" value="${esc(spCmd)}">
+            <button type="button" class="btn btn-primary btn-sm" id="btn-copy-sp">Copy</button>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>Backend Bridge Command (/spb applyedits)</label>
+          <div style="display:flex;gap:8px">
+            <input type="text" readonly class="field-input" style="font-family:var(--mono)" id="save-spb-cmd" value="${esc(spbCmd)}">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-spb">Copy</button>
+          </div>
+        </div>
+      </details>
+    ` : '';
+
+    const longWarning = (!liveResult && tooLong) ? `
+      <div class="val-pill val-false" style="padding:10px 12px;width:100%;justify-content:flex-start;white-space:normal">
+        This code is ${preferredCode.length} characters — Minecraft chat allows 256. Download the <code>.spedit</code> file, upload it to <code>config/stonyperms/imports/</code>, then run <code>/sp applyedits file &lt;name&gt;</code>.
+      </div>
+    ` : '';
+
     openModal('Save Web Editor Changes', `
       ${banner}
-      ${spCmd ? `
+      ${diffHtml}
+      ${longWarning}
+      ${liveResult ? transferHtml : (spCmd ? `
         <div class="field-group">
           <label>Gate Command (/sp applyedits)</label>
           <div style="display:flex;gap:8px">
@@ -1510,10 +1677,13 @@
             <button type="button" class="btn btn-secondary btn-sm" id="btn-copy-spb">Copy</button>
           </div>
         </div>
-      ` : ''}
+      ` : '')}
       <div class="field-group">
-        <label>Backup / Transfer JSON</label>
-        <button type="button" class="btn btn-secondary btn-sm" id="btn-download-json">Download Snapshot JSON</button>
+        <label>Backup / Transfer</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button type="button" class="btn btn-secondary btn-sm" id="btn-download-json">Download Snapshot JSON</button>
+          ${preferredCode ? `<button type="button" class="btn btn-secondary btn-sm" id="btn-download-spedit">Download .spedit Code</button>` : ''}
+        </div>
       </div>
     `);
 
@@ -1532,6 +1702,14 @@
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = 'stonyperms-edits.json';
+      a.click();
+    };
+    const btnSpEdit = document.getElementById('btn-download-spedit');
+    if (btnSpEdit && preferredCode) btnSpEdit.onclick = () => {
+      const blob = new Blob([preferredCode], { type: 'text/plain' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'stonyperms-changes.spedit';
       a.click();
     };
   }
@@ -1842,9 +2020,9 @@
         ${expiryPresets}
       </div>
       <div class="field-group">
-        <label>Contexts (e.g. server=lobby world=hub)</label>
-        <input id="en-ctx" class="field-input" value="${esc(contextsToInputString(row.contexts))}" placeholder="none">
-        ${buildContextSuggestionChips('en-ctx')}
+        <label>Contexts (autocomplete: server, world, dimension-type, gamemode)</label>
+        <input id="en-ctx" class="field-input" list="ctx-pair-list" value="${esc(contextsToInputString(row.contexts))}" placeholder="none">
+        ${contextPairDatalist()}
       </div>
     `, `<button type="button" class="btn btn-primary btn-sm" id="en-save">Save Changes</button>`);
 
@@ -2027,9 +2205,9 @@
           </select>
         </div>
         <div class="field-group">
-          <label>Contexts (optional, e.g. server=lobby)</label>
-          <input id="ap-ctx" class="field-input">
-          ${buildContextSuggestionChips('ap-ctx')}
+          <label>Contexts (autocomplete: server, world, dimension-type, gamemode)</label>
+          <input id="ap-ctx" class="field-input" list="ctx-pair-list">
+          ${contextPairDatalist()}
         </div>
       `, `<button type="button" class="btn btn-primary btn-sm" id="ap-submit">Add Parent</button>`);
       const ctxIn = document.getElementById('ap-ctx');
@@ -2106,28 +2284,20 @@
     const bulkCtx = document.getElementById('btn-bulk-contexts');
     if (bulkCtx) {
       bulkCtx.onclick = () => {
-        openModal(`Set Contexts on ${STATE.checkedRows.size} Node(s)`, `
-          <div class="field-group">
-            <label>Contexts (leave empty for global)</label>
-            <input id="bc-in" class="field-input" placeholder="e.g. server=lobby">
-            ${buildContextSuggestionChips('bc-in')}
-          </div>
-        `, `<button type="button" class="btn btn-primary btn-sm" id="bc-ok">Apply Contexts</button>`);
-        const ctxIn = document.getElementById('bc-in');
-        bindContextSuggestionChips(ctxIn);
-        document.getElementById('bc-ok').onclick = () => {
-          const nextCtx = parseContextsString(ctxIn.value);
+        openContextsModal(`Set Contexts on ${STATE.checkedRows.size} Node(s)`, {}, nextCtx => {
           Array.from(STATE.checkedRows).forEach(id => {
             const r = rowById[id];
             if (r && r.ref) {
-              if (nextCtx) r.ref.contexts = deepClone(nextCtx);
-              else delete r.ref.contexts;
+              if (nextCtx && Object.keys(nextCtx).length) {
+                r.ref.contexts = deepClone(nextCtx);
+              } else {
+                delete r.ref.contexts;
+              }
               markDirty();
             }
           });
-          closeModal();
           render();
-        };
+        });
       };
     }
     const bulkExp = document.getElementById('btn-bulk-expiry');
@@ -2327,29 +2497,10 @@
 
     document.getElementById('btn-dock-add').onclick = addNodeAction;
     document.getElementById('btn-dock-ctx').onclick = () => {
-      const pot = (STATE.editor.potentialContexts && STATE.editor.potentialContexts.server) || ['lobby', 'survival'];
-      openModal('Add Context Constraint', `
-        <div class="field-group"><label>Key (e.g. server, world)</label><input id="dc-k" class="field-input" value="server"></div>
-        <div class="field-group"><label>Value (suggestions: ${esc(pot.join(', '))})</label><input id="dc-v" class="field-input" value="${esc(pot[0] || '')}"></div>
-        ${buildContextSuggestionChips('dc-pair')}
-      `, `<button type="button" class="btn btn-primary btn-sm" id="dc-ok">Add Context</button>`);
-      document.querySelectorAll('[data-ctx-suggest]').forEach(btn => {
-        btn.onclick = () => {
-          const pair = btn.dataset.ctxSuggest;
-          const idx = pair.indexOf('=');
-          if (idx > 0) {
-            document.getElementById('dc-k').value = pair.slice(0, idx);
-            document.getElementById('dc-v').value = pair.slice(idx + 1);
-          }
-        };
-      });
-      document.getElementById('dc-ok').onclick = () => {
-        const ck = document.getElementById('dc-k').value.trim().toLowerCase();
-        const cv = document.getElementById('dc-v').value.trim();
-        if (ck && cv) STATE.addForm.contexts[ck] = cv;
-        closeModal();
+      openContextsModal('Add Context Constraints', STATE.addForm.contexts, ctxs => {
+        STATE.addForm.contexts = ctxs;
         render();
-      };
+      });
     };
     document.querySelectorAll('[data-del-dock-ctx]').forEach(btn => {
       btn.onclick = () => { delete STATE.addForm.contexts[btn.dataset.delDockCtx]; render(); };

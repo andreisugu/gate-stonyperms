@@ -432,7 +432,7 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 			case "tree":
 				candidates = []string{".", "gate", "stonyperms", "bettertab", "simplewhitelist", "smartlimbo", "skinschanger", "discord4gate"}
 			case "log", "logs":
-				candidates = []string{"recent", "search", "userhistory", "grouphistory", "trackhistory"}
+				candidates = []string{"recent", "search", "userhistory", "grouphistory", "trackhistory", "notify"}
 			case "search":
 				candidates = append(candidates, commonPermNodes...)
 				for _, g := range mgr.GetGroups() {
@@ -480,6 +480,8 @@ func buildSuggestions(p *proxy.Proxy, mgr *manager.Manager) SuggestionFunc {
 					for _, t := range mgr.GetTracks() {
 						candidates = append(candidates, t.Name)
 					}
+				case "notify":
+					candidates = []string{"on", "off"}
 				}
 			}
 

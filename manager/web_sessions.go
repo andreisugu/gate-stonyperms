@@ -25,8 +25,10 @@ const (
 	// DefaultPublicWebURL is the public fallback web editor origin when Gate's HTTP server is disabled.
 	DefaultPublicWebURL = "https://andreisugu.github.io/gate-stonyperms"
 
-	// PortableCodePrefix identifies client-generated gzipped+base64url editor payloads.
+	// PortableCodePrefix identifies client-generated full-snapshot gzipped+base64url editor payloads.
 	PortableCodePrefix = "sp1_"
+	// DeltaCodePrefix identifies client-generated delta-only gzipped+base64url editor payloads.
+	DeltaCodePrefix = "sp2_"
 	// ShortApplyPrefix identifies Gate-hosted short apply codes.
 	ShortApplyPrefix = "sp_"
 
@@ -63,6 +65,7 @@ type managerWebState struct {
 	verboseSessions map[string]*verboseSessionEntry
 	treeSessions    map[string]*treeSessionEntry
 	applyCodes      map[string]*applyCodeEntry
+	backendCatalogs map[string]BackendCatalog
 }
 
 // WebConfig configures URL generation for StonyPermsWeb sessions.
@@ -163,8 +166,9 @@ type EditorApplySummary struct {
 	GroupsDeleted int    `json:"groupsDeleted"`
 	TracksUpdated int    `json:"tracksUpdated"`
 	TracksDeleted int    `json:"tracksDeleted"`
-	UsersUpdated  int    `json:"usersUpdated"`
-	UsersDeleted  int    `json:"usersDeleted"`
+	UsersUpdated  int      `json:"usersUpdated"`
+	UsersDeleted  int      `json:"usersDeleted"`
+	Diff          []string `json:"diff,omitempty"`
 }
 
 // VerboseSessionMetadata describes a recorded verbose paste session.
@@ -235,6 +239,7 @@ func (m *Manager) getWebState() *managerWebState {
 		verboseSessions: make(map[string]*verboseSessionEntry),
 		treeSessions:    make(map[string]*treeSessionEntry),
 		applyCodes:      make(map[string]*applyCodeEntry),
+		backendCatalogs: make(map[string]BackendCatalog),
 	}
 	actual, _ := webStateMap.LoadOrStore(m, st)
 	return actual.(*managerWebState)
@@ -348,12 +353,22 @@ func (m *Manager) CreateEditorSession(opts WebSessionCreateOptions) (*EditorSess
 	runtimeServers := append([]string(nil), st.onlineServers...)
 	st.mu.Unlock()
 
-	combinedExtras := make([]string, 0, len(runtimePerms)+len(opts.ExtraPermissions))
+	catalogPerms, catalogContexts := m.BackendCatalogSnapshot()
+	combinedExtras := make([]string, 0, len(runtimePerms)+len(opts.ExtraPermissions)+len(catalogPerms))
 	combinedExtras = append(combinedExtras, runtimePerms...)
 	combinedExtras = append(combinedExtras, opts.ExtraPermissions...)
+	combinedExtras = append(combinedExtras, catalogPerms...)
+
+	mergedContexts := make(map[string][]string, len(opts.ExtraContexts)+len(catalogContexts))
+	for key, values := range opts.ExtraContexts {
+		mergedContexts[key] = append([]string(nil), values...)
+	}
+	for key, values := range catalogContexts {
+		mergedContexts[key] = append(mergedContexts[key], values...)
+	}
 
 	knownPerms := collectKnownPermissions(groups, users, combinedExtras)
-	contexts := collectPotentialContexts(groups, users, runtimeServers, opts.ExtraContexts)
+	contexts := collectPotentialContexts(groups, users, runtimeServers, mergedContexts)
 
 	session := EditorSessionData{
 		Token: token,
@@ -511,7 +526,7 @@ func (m *Manager) CreateShortApplyCode(payload EditorSavePayload) (string, error
 // ApplyEditCode decodes a sp1_ portable payload or consumes a sp_ code and applies all changes.
 func (m *Manager) ApplyEditCode(actor string, rawCode string) (EditorApplySummary, error) {
 	code := strings.TrimSpace(rawCode)
-	if strings.HasPrefix(code, PortableCodePrefix) {
+	if strings.HasPrefix(code, PortableCodePrefix) || strings.HasPrefix(code, DeltaCodePrefix) {
 		payload, err := DecodePortableApplyCode(code)
 		if err != nil {
 			return EditorApplySummary{}, err
@@ -566,14 +581,19 @@ func EncodePortableApplyCode(payload EditorSavePayload) (string, error) {
 	return PortableCodePrefix + base64.RawURLEncoding.EncodeToString(buf.Bytes()), nil
 }
 
-// DecodePortableApplyCode decodes an sp1_ payload while capping decompressed bytes to 64 KiB.
+// DecodePortableApplyCode decodes an sp1_/sp2_ payload while capping decompressed bytes to 64 KiB.
 func DecodePortableApplyCode(code string) (EditorSavePayload, error) {
 	var zero EditorSavePayload
 	trimmed := strings.TrimSpace(code)
-	if !strings.HasPrefix(trimmed, PortableCodePrefix) {
+	prefix := ""
+	if strings.HasPrefix(trimmed, PortableCodePrefix) {
+		prefix = PortableCodePrefix
+	} else if strings.HasPrefix(trimmed, DeltaCodePrefix) {
+		prefix = DeltaCodePrefix
+	} else {
 		return zero, ErrInvalidApplyCode
 	}
-	encoded := strings.TrimPrefix(trimmed, PortableCodePrefix)
+	encoded := strings.TrimPrefix(trimmed, prefix)
 	if encoded == "" {
 		return zero, ErrInvalidApplyCode
 	}
@@ -709,12 +729,18 @@ func (m *Manager) ApplyEditorPayload(actor string, payload EditorSavePayload) (E
 
 	var summary EditorApplySummary
 	summary.Applied = true
+	var diff []string
 
 	// Persist groups
 	for _, g := range cleanGroups {
 		existing := m.groups[g.Name]
 		if existing != nil && editorGroupEqual(existing, g) {
 			continue
+		}
+		if existing == nil {
+			diff = append(diff, "+ group "+g.Name)
+		} else {
+			diff = append(diff, diffGroup(existing, g)...)
 		}
 		if err := m.storage.SaveGroup(g); err != nil {
 			return EditorApplySummary{}, err
@@ -726,6 +752,7 @@ func (m *Manager) ApplyEditorPayload(actor string, payload EditorSavePayload) (E
 		if _, exists := m.groups[name]; !exists {
 			continue
 		}
+		diff = append(diff, "- group "+name)
 		if err := m.storage.DeleteGroup(name); err != nil {
 			return EditorApplySummary{}, err
 		}
@@ -739,6 +766,11 @@ func (m *Manager) ApplyEditorPayload(actor string, payload EditorSavePayload) (E
 		if existing != nil && editorTrackEqual(existing, t) {
 			continue
 		}
+		if existing == nil {
+			diff = append(diff, "+ track "+t.Name)
+		} else {
+			diff = append(diff, diffTrack(existing, t)...)
+		}
 		if err := m.storage.SaveTrack(t); err != nil {
 			return EditorApplySummary{}, err
 		}
@@ -749,6 +781,7 @@ func (m *Manager) ApplyEditorPayload(actor string, payload EditorSavePayload) (E
 		if _, exists := m.tracks[name]; !exists {
 			continue
 		}
+		diff = append(diff, "- track "+name)
 		if err := m.storage.DeleteTrack(name); err != nil {
 			return EditorApplySummary{}, err
 		}
@@ -761,6 +794,11 @@ func (m *Manager) ApplyEditorPayload(actor string, payload EditorSavePayload) (E
 		existing := m.users[u.UUID]
 		if existing != nil && editorUserEqual(existing, u) {
 			continue
+		}
+		if existing == nil {
+			diff = append(diff, "+ user "+u.Username)
+		} else {
+			diff = append(diff, diffUser(existing, u)...)
 		}
 		if err := m.storage.SaveUser(u); err != nil {
 			return EditorApplySummary{}, err
@@ -779,6 +817,7 @@ func (m *Manager) ApplyEditorPayload(actor string, payload EditorSavePayload) (E
 		if !exists || existing == nil {
 			continue
 		}
+		diff = append(diff, "- user "+existing.Username)
 		if err := m.storage.DeleteUser(id); err != nil {
 			return EditorApplySummary{}, err
 		}
@@ -793,6 +832,7 @@ func (m *Manager) ApplyEditorPayload(actor string, payload EditorSavePayload) (E
 		summary.TracksUpdated + summary.TracksDeleted +
 		summary.UsersUpdated + summary.UsersDeleted
 
+	summary.Diff = capDiff(diff)
 	if totalChanges == 0 {
 		summary.Revision = m.revision.Load()
 		return summary, nil
@@ -803,6 +843,10 @@ func (m *Manager) ApplyEditorPayload(actor string, payload EditorSavePayload) (E
 	auditMsg := fmt.Sprintf("Applied web edits (%d groups updated, %d groups deleted, %d tracks updated, %d tracks deleted, %d users updated, %d users deleted)",
 		summary.GroupsUpdated, summary.GroupsDeleted, summary.TracksUpdated, summary.TracksDeleted, summary.UsersUpdated, summary.UsersDeleted)
 	m.logActionLocked(actor, "general", "web-editor", auditMsg)
+
+	// Broadcast the itemized diff after releasing m.mu (the notifier consults
+	// per-player notification preferences, which take the same lock).
+	go m.notifyEditorChange(EditorChangeNotice{Actor: actor, Summary: summary})
 
 	// Notify subscribers outside m.mu after releasing lock via goroutine-safe helper or deferring notification.
 	go m.notifyEvent(ChangeEvent{
@@ -965,9 +1009,11 @@ func (m *Manager) CreateTreeSession(root, actor, commandAlias string, extraPerms
 	runtimePerms := append([]string(nil), st.knownPerms...)
 	st.mu.Unlock()
 
-	mergedExtras := make([]string, 0, len(runtimePerms)+len(extraPerms))
+	catalogPerms, _ := m.BackendCatalogSnapshot()
+	mergedExtras := make([]string, 0, len(runtimePerms)+len(extraPerms)+len(catalogPerms))
 	mergedExtras = append(mergedExtras, runtimePerms...)
 	mergedExtras = append(mergedExtras, extraPerms...)
+	mergedExtras = append(mergedExtras, catalogPerms...)
 
 	allPerms := collectKnownPermissions(groups, users, mergedExtras)
 	var filtered []string
@@ -1498,8 +1544,10 @@ func collectKnownPermissions(groups []model.Group, users []model.User, extras []
 
 func collectPotentialContexts(groups []model.Group, users []model.User, servers []string, extras map[string][]string) map[string][]string {
 	ctxSets := map[string]map[string]struct{}{
-		"server": {"lobby": {}, "survival": {}, "creative": {}, "hub": {}},
-		"world":  {"world": {}, "world_nether": {}, "world_the_end": {}, "hub": {}},
+		"server":         {"lobby": {}, "survival": {}, "creative": {}, "hub": {}},
+		"world":          {"world": {}, "world_nether": {}, "world_the_end": {}, "hub": {}},
+		"dimension-type": {"overworld": {}, "the_nether": {}, "the_end": {}},
+		"gamemode":       {"survival": {}, "creative": {}, "adventure": {}, "spectator": {}},
 	}
 	addCtx := func(k, v string) {
 		k = strings.ToLower(strings.TrimSpace(k))
@@ -1600,6 +1648,7 @@ func defaultKnownPermissions() []string {
 		"stonyperms.listgroups",
 		"stonyperms.listtracks",
 		"stonyperms.log",
+		"stonyperms.log.notify",
 		"stonyperms.search",
 		"stonyperms.sync",
 		"stonyperms.track",

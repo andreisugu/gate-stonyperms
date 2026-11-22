@@ -2,6 +2,7 @@ package stonyperms
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"github.com/robinbraemer/event"
+	c "go.minekube.com/common/minecraft/component"
 	"go.minekube.com/gate/pkg/edition/java/proxy"
 
 	"github.com/andreisugu/gate-stonyperms/api"
@@ -114,6 +116,9 @@ var Plugin = proxy.Plugin{
 			log.Error(err, "Failed to load stonyperms.toml, using defaults")
 			cfg = defaultConfig()
 		}
+		if cfg.MigrationBackup != "" {
+			log.Info("Migrated StonyPerms config", "fromVersion", cfg.MigratedFrom, "toVersion", CurrentConfigVersion, "backup", cfg.MigrationBackup)
+		}
 
 		store, err := storage.Open(cfg.StorageType, cfg.StorageDir, storage.SQLConfig{
 			File:                   cfg.Database.File,
@@ -140,7 +145,38 @@ var Plugin = proxy.Plugin{
 		}
 		if cfg.StorageDir != "" {
 			mgr.SetExportDir(filepath.Join(cfg.StorageDir, "exports"))
+			mgr.SetImportDir(filepath.Join(cfg.StorageDir, "imports"))
 		}
+		mgr.SetEditorChangeNotifier(func(notice manager.EditorChangeNotice) {
+			if len(notice.Summary.Diff) == 0 {
+				return
+			}
+			for _, pl := range p.Players() {
+				if pl == nil {
+					continue
+				}
+				if !pl.HasPermission("stonyperms.log.notify") && !pl.HasPermission("stonyperms.admin") && !pl.HasPermission("*") {
+					continue
+				}
+				if !mgr.LogNotifyEnabled(pl.Username()) {
+					continue
+				}
+				_ = pl.SendMessage(&c.Text{Content: fmt.Sprintf("§8[§bStonyPerms§8] §7%s applied §f%d §7change(s):", notice.Actor, len(notice.Summary.Diff))})
+				for i, line := range notice.Summary.Diff {
+					if i >= 12 {
+						_ = pl.SendMessage(&c.Text{Content: "§8  ... more in the audit log"})
+						break
+					}
+					color := "§e"
+					if strings.HasPrefix(line, "+") {
+						color = "§a"
+					} else if strings.HasPrefix(line, "-") {
+						color = "§c"
+					}
+					_ = pl.SendMessage(&c.Text{Content: "§8  " + color + line})
+				}
+			}
+		})
 		globalManager.Store(mgr)
 		mgr.SetDefaultGroup(cfg.DefaultGroup)
 		mgr.SetAuditLogEnabled(cfg.EnableAuditLog)

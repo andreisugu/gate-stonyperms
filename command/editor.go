@@ -55,7 +55,17 @@ func HandleApplyEdits(mgr *manager.Manager, src command.Source, args []string) e
 		return nil
 	}
 	if len(args) < 1 {
-		return src.SendMessage(Msg(Prefix + "&cUsage: /sp applyedits <code>&r"))
+		return src.SendMessage(Msg(Prefix + "&cUsage: /sp applyedits <code|file <name>>&r"))
+	}
+	if strings.EqualFold(strings.TrimSpace(args[0]), "file") {
+		if len(args) < 2 {
+			return src.SendMessage(Msg(Prefix + "&cUsage: /sp applyedits file <name>&r"))
+		}
+		summary, err := mgr.ApplyEditFile(getActorName(src), strings.TrimSpace(args[1]))
+		if err != nil {
+			return src.SendMessage(Msg(Prefix+"&cFailed to apply %s: %v&r", args[1], err))
+		}
+		return sendApplySummary(src, summary)
 	}
 	raw := strings.TrimSpace(args[0])
 	if strings.EqualFold(raw, "applyedits") && len(args) > 1 {
@@ -64,6 +74,21 @@ func HandleApplyEdits(mgr *manager.Manager, src command.Source, args []string) e
 	summary, err := mgr.ApplyEditCode(getActorName(src), raw)
 	if err != nil {
 		return src.SendMessage(Msg(Prefix+"&cFailed to apply web edits: %v&r", err))
+	}
+	return sendApplySummary(src, summary)
+}
+
+func sendApplySummary(src command.Source, summary manager.EditorApplySummary) error {
+	if len(summary.Diff) > 0 {
+		_ = src.SendMessage(Msg(Prefix+"&aApplied web edits (rev &e#%d&a):&r", summary.Revision))
+		for i, line := range summary.Diff {
+			if i >= 12 {
+				_ = src.SendMessage(MsgPlain("&7  ... and more changes in the audit log&r"))
+				break
+			}
+			_ = src.SendMessage(MsgPlain("&7  " + line + "&r"))
+		}
+		return nil
 	}
 	return src.SendMessage(Msg(
 		Prefix+"&aApplied web edits (rev &e#%d&a): &e%d&7 groups (&c-%d&7), &e%d&7 tracks (&c-%d&7), &e%d&7 users (&c-%d&7).&r",

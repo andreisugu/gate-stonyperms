@@ -328,6 +328,7 @@ func (s *Server) routes() http.Handler {
 	mux.Handle("GET /v1/tracks", s.readRoute(s.handleTracks))
 	mux.Handle("GET /v1/tracks/{name}", s.readRoute(s.handleTrack))
 	mux.Handle("GET /v1/search", s.readRoute(s.handleSearch))
+	mux.Handle("POST /v1/backends/catalog", s.readRoute(s.handleBackendCatalog))
 
 	// Write-tier user routes
 	mux.Handle("POST /v1/users", s.writeRoute(s.handleEnsureUser, true))

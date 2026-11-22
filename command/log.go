@@ -15,6 +15,28 @@ const pageSize = 8
 
 // HandleLogDispatch routes /sp log <subcommand> calls.
 func HandleLogDispatch(mgr *manager.Manager, src command.Source, args []string) error {
+	if len(args) > 0 && strings.EqualFold(args[0], "notify") {
+		if !checkPerm(src, "stonyperms.log.notify") {
+			return nil
+		}
+		if len(args) < 2 {
+			state := "on"
+			if !mgr.LogNotifyEnabled(getActorName(src)) {
+				state = "off"
+			}
+			return src.SendMessage(Msg(Prefix+"&7Editor change notifications are &e%s&7. Usage: &b/sp log notify <on|off>&r", state))
+		}
+		switch strings.ToLower(args[1]) {
+		case "on", "true", "enable", "enabled":
+			mgr.SetLogNotify(getActorName(src), true)
+			return src.SendMessage(Msg(Prefix + "&aEditor change notifications enabled.&r"))
+		case "off", "false", "disable", "disabled":
+			mgr.SetLogNotify(getActorName(src), false)
+			return src.SendMessage(Msg(Prefix + "&eEditor change notifications muted.&r"))
+		default:
+			return src.SendMessage(Msg(Prefix + "&cUsage: /sp log notify <on|off>&r"))
+		}
+	}
 	if len(args) == 0 || strings.EqualFold(args[0], "recent") {
 		page := 1
 		if len(args) > 1 {
