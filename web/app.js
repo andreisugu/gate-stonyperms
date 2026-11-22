@@ -1595,7 +1595,8 @@
     }
     const preferredCode = applyCode || portableCode;
     const spCmd = preferredCode ? `/sp applyedits ${preferredCode}` : '';
-    const spbCmd = preferredCode ? `/spb applyedits ${preferredCode}` : '';
+    const portableCodeOnly = preferredCode.startsWith('sp1_') || preferredCode.startsWith('sp2_');
+    const spbCmd = portableCodeOnly ? `/spb applyedits ${preferredCode}` : '';
     const tooLong = preferredCode.length > 256;
 
     let banner = '';
@@ -1642,7 +1643,7 @@
             <button type="button" class="btn btn-primary btn-sm" id="btn-copy-sp">Copy</button>
           </div>
         </div>
-        <div class="field-group">
+        <div class="field-group" style="display:${spbCmd ? 'block' : 'none'}">
           <label>Backend Bridge Command (/spb applyedits)</label>
           <div style="display:flex;gap:8px">
             <input type="text" readonly class="field-input" style="font-family:var(--mono)" id="save-spb-cmd" value="${esc(spbCmd)}">
@@ -1670,7 +1671,7 @@
             <button type="button" class="btn btn-primary btn-sm" id="btn-copy-sp">Copy</button>
           </div>
         </div>
-        <div class="field-group">
+        <div class="field-group" style="display:${spbCmd ? 'block' : 'none'}">
           <label>Backend Bridge Command (/spb applyedits)</label>
           <div style="display:flex;gap:8px">
             <input type="text" readonly class="field-input" style="font-family:var(--mono)" id="save-spb-cmd" value="${esc(spbCmd)}">
